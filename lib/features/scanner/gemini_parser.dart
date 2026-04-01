@@ -11,8 +11,8 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 
 class GeminiParser {
-  // Replace with your actual Gemini API key (store in .env / flutter_dotenv in prod)
-  static const _apiKey = 'AIzaSyAZldURA7SHofJwJZx-6fPfl0gvYkLt2xA';
+  // Define in launch via --dart-define=GEMINI_API_KEY=your_key
+  static const _apiKey = String.fromEnvironment('GEMINI_API_KEY', defaultValue: '');
   static const _model = 'gemini-1.5-flash-latest';
   static const _endpoint =
       'https://generativelanguage.googleapis.com/v1beta/models/$_model:generateContent';
