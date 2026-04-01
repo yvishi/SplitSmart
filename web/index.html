@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+  <base href="$FLUTTER_BASE_HREF">
+
+  <meta charset="UTF-8">
+  <meta content="IE=Edge" http-equiv="X-UA-Compatible">
+  <meta name="description" content="SplitSmart — split bills, stay friends.">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+  <!-- iOS meta tags & icons -->
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black">
+  <meta name="apple-mobile-web-app-title" content="SplitSmart">
+  <link rel="apple-touch-icon" href="icons/Icon-192.png">
+
+  <!-- Favicon -->
+  <link rel="icon" type="image/png" href="favicon.png" />
+
+  <title>SplitSmart</title>
+  <link rel="manifest" href="manifest.json">
+
+  <!--
+    GOOGLE SIGN-IN — WEB
+    Replace YOUR_WEB_CLIENT_ID with the OAuth 2.0 Web Client ID from:
+    Firebase Console → Authentication → Sign-in method → Google → Web SDK configuration
+    It looks like: XXXXXXXXXX-XXXX.apps.googleusercontent.com
+  -->
+  <meta name="google-signin-client_id"
+    content="826925038249-pksf80q8ljbr3qtqm5pt5m6bfb02rin6.apps.googleusercontent.com">
+
+  <!--
+    FIREBASE JS SDK — loads Firebase Auth + Firestore for web.
+    These must be loaded BEFORE flutter_bootstrap.js.
+  -->
+  <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-auth-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore-compat.js"></script>
+
+  <script>
+    // Initialize Firebase for the web renderer.
+    // These values come from your google-services.json / Firebase Console.
+    const firebaseConfig = {
+      apiKey: "AIzaSyBwT9gp365EaWHmjAQZPznpAL6wm4MGRAA",
+      authDomain: "splitsmart-24c51.firebaseapp.com",
+      projectId: "splitsmart-24c51",
+      storageBucket: "splitsmart-24c51.firebasestorage.app",
+      messagingSenderId: "826925038249",
+      appId: "1:826925038249:android:50da94e59b4348dc1d47b8"
+    };
+
+    // Only initialise once (Flutter hot-reload safe)
+    if (!firebase.apps.length) {
+      firebase.initializeApp(firebaseConfig);
+    }
+  </script>
+
+  <!-- Google Sign-In JS (GSI) — required by google_sign_in_web -->
+  <script src="https://accounts.google.com/gsi/client" async defer></script>
+</head>
+
+<body>
+  <!--
+    reCAPTCHA container for Firebase Phone Auth on web.
+    Firebase renders the reCAPTCHA widget here during phone verification.
+    DO NOT remove this div.
+  -->
+  <div id="recaptcha-container"></div>
+
+  <script src="flutter_bootstrap.js" async></script>
+</body>
+
+</html>
