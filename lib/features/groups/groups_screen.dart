@@ -482,16 +482,12 @@ class _CreateGroupSheetState extends ConsumerState<_CreateGroupSheet> {
       return;
     }
 
-    final group = await GroupsRepository.createGroup(
+    await GroupsRepository.createGroup(
       name: _nameCtrl.text.trim(),
       type: _type,
       creatorUid: auth.profile.uid,
+      memberUids: _selectedUids.toList(),  // all selected contacts included atomically
     );
-
-    // Add selected contacts as members in a single batch
-    for (final uid in _selectedUids) {
-      await GroupsRepository.addMember(group.id, uid);
-    }
 
     if (mounted) Navigator.pop(context);
   }

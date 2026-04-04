@@ -7,31 +7,37 @@ class GroupsRepository {
   static CollectionReference<Map<String, dynamic>> get _groups =>
       _db.collection('groups');
 
-  /// Create a new group and add the creator as the first member.
+  /// Create a new group with a full member list in one atomic batch.
   static Future<Group> createGroup({
     required String name,
     required GroupType type,
     required String creatorUid,
+    List<String> memberUids = const [],
   }) async {
     final docRef = _groups.doc();
     final now = DateTime.now();
+    // Always include creator in members
+    final allMembers = {creatorUid, ...memberUids}.toList();
     final group = Group(
       id: docRef.id,
       name: name,
       type: type,
-      memberUids: [creatorUid],
+      memberUids: allMembers,
       createdBy: creatorUid,
       createdAt: now,
       updatedAt: now,
     );
 
-    // Write the group
-    await docRef.set(group.toMap());
-
-    // Also update the user's denormalized groupIds list
-    await _db.collection('users').doc(creatorUid).update({
-      'groupIds': FieldValue.arrayUnion([docRef.id])
-    });
+    final batch = _db.batch();
+    // Write the group with all members
+    batch.set(docRef, group.toMap());
+    // Update groupIds for every member atomically
+    for (final uid in allMembers) {
+      batch.update(_db.collection('users').doc(uid), {
+        'groupIds': FieldValue.arrayUnion([docRef.id]),
+      });
+    }
+    await batch.commit();
 
     return group;
   }

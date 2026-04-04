@@ -61,9 +61,11 @@ class _AddExpenseSheetState extends ConsumerState<AddExpenseSheet> {
         : groups.first;
     _selectedGroupId = initial.id;
     _paidByUid = currentUid;
+    // Pre-select all OTHER members (not the current user — they're the payer)
+    final others = initial.memberUids.where((uid) => uid != currentUid).toList();
     _selectedMembers
       ..clear()
-      ..addAll(initial.memberUids);
+      ..addAll(others);
     _fetchMemberNames(initial.memberUids, currentUid);
   }
 
@@ -149,11 +151,14 @@ class _AddExpenseSheetState extends ConsumerState<AddExpenseSheet> {
                 onChanged: (id) {
                   if (id == null) return;
                   final g = groups.firstWhere((g) => g.id == id);
+                  final others = g.memberUids
+                      .where((uid) => uid != currentUid)
+                      .toList();
                   setState(() {
                     _selectedGroupId = id;
                     _selectedMembers
                       ..clear()
-                      ..addAll(g.memberUids);
+                      ..addAll(others);
                   });
                   _fetchMemberNames(g.memberUids, currentUid);
                 },
@@ -236,15 +241,19 @@ class _AddExpenseSheetState extends ConsumerState<AddExpenseSheet> {
             ),
             const SizedBox(height: Spacing.base),
 
-            // ── Members ────────────────────────────────────────────────
-            Text('With', style: AppTextStyles.overline()),
+            // ── Split with ────────────────────────────────────────────────
+            Text('Split with', style: AppTextStyles.overline()),
             const SizedBox(height: Spacing.sm),
             Wrap(
               spacing: Spacing.sm,
               runSpacing: Spacing.sm,
-              children: members.map((uid) {
-                final sel = _selectedMembers.contains(uid);
-                return GestureDetector(
+              children: [
+                // Show only OTHER members (current user is always the payer)
+                ...members
+                    .where((uid) => uid != currentUid)
+                    .map((uid) {
+                  final sel = _selectedMembers.contains(uid);
+                  return GestureDetector(
                   onTap: () {
                     Haptics.lightTap();
                     setState(() {
@@ -274,16 +283,12 @@ class _AddExpenseSheetState extends ConsumerState<AddExpenseSheet> {
                       mainAxisSize: MainAxisSize.min,
                       children: [
                         AppAvatar(
-                          name: uid == currentUid
-                              ? 'You'
-                              : (_memberNames[uid] ?? uid.substring(0, 4)),
+                          name: _memberNames[uid] ?? uid.substring(0, 4),
                           size: 20,
                         ),
                         const SizedBox(width: Spacing.xs),
                         Text(
-                          uid == currentUid
-                              ? 'You'
-                              : (_memberNames[uid] ?? '...'),
+                          _memberNames[uid] ?? '...',
                           style: AppTextStyles.caption(
                             color: sel
                                 ? AppColors.forest
@@ -294,7 +299,18 @@ class _AddExpenseSheetState extends ConsumerState<AddExpenseSheet> {
                     ),
                   ),
                 );
-              }).toList(),
+                // Close .map + list
+                }),
+                // If no other members, show a hint
+                if (members.where((uid) => uid != currentUid).isEmpty)
+                  Padding(
+                    padding: const EdgeInsets.all(Spacing.sm),
+                    child: Text(
+                      'No other members in this group yet.',
+                      style: AppTextStyles.caption(color: AppColors.stone),
+                    ),
+                  ),
+              ],
             ),
             const SizedBox(height: Spacing.xl),
 
@@ -320,7 +336,14 @@ class _AddExpenseSheetState extends ConsumerState<AddExpenseSheet> {
   Future<void> _save() async {
     Haptics.lightTap();
     final amount = double.tryParse(_amountCtrl.text) ?? 0.0;
-    if (amount <= 0 || _selectedGroupId == null || _paidByUid == null) return;
+    if (amount <= 0 || _selectedGroupId == null) return;
+
+    // Payer (current user) is always a participant, plus whoever was selected
+    final auth = ref.read(authStateProvider);
+    final currentUid = auth is AuthAuthenticated ? auth.profile.uid : null;
+    if (currentUid == null) return;
+
+    final participants = {currentUid, ..._selectedMembers}.toList();
 
     final expense = Expense(
       id: const Uuid().v4(),
@@ -329,11 +352,11 @@ class _AddExpenseSheetState extends ConsumerState<AddExpenseSheet> {
       totalAmount: amount,
       category: _category,
       splitType: _splitType,
-      paidByUid: _paidByUid!,
-      participantUids: _selectedMembers.toList(),
+      paidByUid: currentUid,
+      participantUids: participants,
       createdAt: DateTime.now(),
       updatedAt: DateTime.now(),
-      createdByUid: _paidByUid!,
+      createdByUid: currentUid,
     );
 
     await ExpensesRepository.createExpense(
