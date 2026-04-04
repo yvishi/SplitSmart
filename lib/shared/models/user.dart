@@ -4,6 +4,7 @@ class AppUser {
   final String uid;
   final String name;
   final String phone;       // +91XXXXXXXXXX
+  final String email;       // optional — auto-filled for Google users
   final String upiVpa;      // user@okaxis (empty until set)
   final DateTime createdAt;
   final List<String> groupIds;    // denormalized for home screen
@@ -13,6 +14,7 @@ class AppUser {
     required this.uid,
     required this.name,
     required this.phone,
+    this.email = '',
     required this.upiVpa,
     required this.createdAt,
     required this.groupIds,
@@ -25,6 +27,7 @@ class AppUser {
       uid: doc.id,
       name: d['name'] as String? ?? 'Unnamed',
       phone: d['phone'] as String? ?? '',
+      email: d['email'] as String? ?? '',
       upiVpa: d['upiVpa'] as String? ?? '',
       createdAt: (d['createdAt'] as Timestamp?)?.toDate() ?? DateTime.now(),
       groupIds: List<String>.from(d['groupIds'] as List? ?? []),
@@ -35,6 +38,7 @@ class AppUser {
   Map<String, dynamic> toMap() => {
         'name': name,
         'phone': phone,
+        'email': email,
         'upiVpa': upiVpa,
         'createdAt': Timestamp.fromDate(createdAt),
         'groupIds': groupIds,
@@ -43,6 +47,7 @@ class AppUser {
 
   AppUser copyWith({
     String? name,
+    String? email,
     String? upiVpa,
     List<String>? groupIds,
   }) =>
@@ -50,9 +55,11 @@ class AppUser {
         uid: uid,
         name: name ?? this.name,
         phone: phone,
+        email: email ?? this.email,
         upiVpa: upiVpa ?? this.upiVpa,
         createdAt: createdAt,
         groupIds: groupIds ?? this.groupIds,
+        contactUids: contactUids,
       );
 
   /// Deterministic avatar color index (0-7) based on name hash.
@@ -66,4 +73,3 @@ class AppUser {
     return '${parts.first[0]}${parts.last[0]}'.toUpperCase();
   }
 }
-

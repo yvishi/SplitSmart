@@ -30,12 +30,14 @@ class UserRepository {
     required String uid,
     required String name,
     required String phone,
+    String email = '',
     String upiVpa = '',
   }) async {
     await _doc(uid).set(AppUser(
       uid: uid,
       name: name,
       phone: phone,
+      email: email,
       upiVpa: upiVpa,
       createdAt: DateTime.now(),
       groupIds: [],
@@ -44,10 +46,12 @@ class UserRepository {
 
   /// Update mutable fields on an existing profile.
   static Future<void> updateProfile(
-      String uid, {String? name, String? upiVpa}) async {
+      String uid, {String? name, String? upiVpa, String? phone, String? email}) async {
     final updates = <String, dynamic>{};
     if (name != null) updates['name'] = name;
     if (upiVpa != null) updates['upiVpa'] = upiVpa;
+    if (phone != null) updates['phone'] = phone;
+    if (email != null) updates['email'] = email;
     if (updates.isEmpty) return;
     await _doc(uid).update(updates);
   }

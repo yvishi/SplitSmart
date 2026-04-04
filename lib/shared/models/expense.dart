@@ -134,7 +134,7 @@ class Expense {
         // Sum items assigned to this uid
         return items
             .where((item) => item.assignedUids.contains(uid))
-            .fold(0.0, (sum, item) => sum + item.price * item.quantity);
+            .fold(0.0, (sum, item) => sum + item.price);
     }
   }
 

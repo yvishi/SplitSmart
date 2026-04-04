@@ -1,4 +1,6 @@
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import '../../core/router/app_router.dart';
@@ -28,9 +30,18 @@ class ProfileScreen extends ConsumerStatefulWidget {
 
 class _ProfileScreenState extends ConsumerState<ProfileScreen> {
   final _nameCtrl = TextEditingController();
+  final _phoneCtrl = TextEditingController();
+  final _emailCtrl = TextEditingController();
   final _upiCtrl = TextEditingController();
   bool _saving = false;
   bool _editMode = false;
+
+  /// Google/email users have no phoneNumber in Firebase Auth.
+  /// Using null-safe chain to never throw.
+  bool get _isGoogleUser {
+    final phone = FirebaseAuth.instance.currentUser?.phoneNumber;
+    return phone == null || phone.isEmpty;
+  }
 
   @override
   void initState() {
@@ -42,6 +53,8 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
     final auth = ref.read(authNotifierProvider);
     if (auth is AuthAuthenticated) {
       _nameCtrl.text = auth.profile.name;
+      _phoneCtrl.text = auth.profile.phone;
+      _emailCtrl.text = auth.profile.email;
       _upiCtrl.text = auth.profile.upiVpa;
     }
   }
@@ -49,6 +62,8 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
   @override
   void dispose() {
     _nameCtrl.dispose();
+    _phoneCtrl.dispose();
+    _emailCtrl.dispose();
     _upiCtrl.dispose();
     super.dispose();
   }
@@ -74,10 +89,24 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
       return;
     }
 
+    // Build phone — only update if Google user and field is non-empty
+    String? phoneUpdate;
+    if (_isGoogleUser) {
+      final rawPhone = _phoneCtrl.text.trim();
+      if (rawPhone.isNotEmpty) {
+        phoneUpdate = rawPhone.startsWith('+') ? rawPhone : '+91$rawPhone';
+      }
+    }
+
+    // Email — optional for all users
+    final emailRaw = _emailCtrl.text.trim();
+
     await UserRepository.updateProfile(
       auth.profile.uid,
       name: _nameCtrl.text.trim().isEmpty ? null : _nameCtrl.text.trim(),
       upiVpa: upiRaw.isEmpty ? null : upiRaw,
+      phone: phoneUpdate,
+      email: emailRaw.isEmpty ? null : emailRaw,
     );
     await ref.read(authNotifierProvider.notifier).refreshProfile();
 
@@ -224,6 +253,44 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
             textCapitalization: TextCapitalization.words,
             decoration: const InputDecoration(
               prefixIcon: Icon(Icons.person_outline),
+            ),
+          ),
+          const SizedBox(height: Spacing.base),
+
+          // ── Phone Number ─────────────────────────────────────────────────
+          // For Google users: editable so they can be found by contacts search.
+          // For phone/OTP users: read-only (set by Firebase Auth).
+          Text('PHONE NUMBER', style: AppTextStyles.overline()),
+          const SizedBox(height: Spacing.sm),
+          TextFormField(
+            controller: _phoneCtrl,
+            enabled: _editMode && _isGoogleUser,
+            keyboardType: TextInputType.phone,
+            inputFormatters: [FilteringTextInputFormatter.allow(RegExp(r'[\d+]'))],
+            style: AppTextStyles.body(),
+            decoration: InputDecoration(
+              prefixIcon: const Icon(Icons.phone_outlined),
+              hintText: '+91 98765 43210',
+              helperText: _isGoogleUser
+                  ? 'Friends can search you by this number'
+                  : 'Set by your phone sign-in',
+            ),
+          ),
+          const SizedBox(height: Spacing.base),
+
+          // ── Email ─────────────────────────────────────────────────────────
+          // Google users: auto-filled & read-only. Phone users: editable (optional).
+          Text('EMAIL (OPTIONAL)', style: AppTextStyles.overline()),
+          const SizedBox(height: Spacing.sm),
+          TextFormField(
+            controller: _emailCtrl,
+            enabled: _editMode && !_isGoogleUser,  // Google email is always read-only
+            keyboardType: TextInputType.emailAddress,
+            style: AppTextStyles.body(),
+            decoration: InputDecoration(
+              prefixIcon: const Icon(Icons.email_outlined),
+              hintText: 'you@example.com',
+              helperText: _isGoogleUser ? 'From your Google account' : null,
             ),
           ),
           const SizedBox(height: Spacing.base),

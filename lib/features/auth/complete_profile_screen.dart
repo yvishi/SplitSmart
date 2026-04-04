@@ -10,7 +10,12 @@ import 'auth_notifier.dart';
 import 'user_repository.dart';
 
 /// Shown after first sign-in when no Firestore profile exists yet.
-/// Collects: Display name (required) + phone (required for Google users) + UPI VPA (optional).
+///
+/// Fields:
+///  - Name (required, all users)
+///  - Phone (required for Google users; auto-set for OTP users)
+///  - Email (optional for all users; auto-filled for Google users)
+///  - UPI VPA (optional)
 class CompleteProfileScreen extends ConsumerStatefulWidget {
   const CompleteProfileScreen({super.key});
 
@@ -24,19 +29,32 @@ class _CompleteProfileScreenState
   final _formKey = GlobalKey<FormState>();
   final _nameCtrl = TextEditingController();
   final _phoneCtrl = TextEditingController();
+  final _emailCtrl = TextEditingController();
   final _upiCtrl = TextEditingController();
   bool _saving = false;
   String? _error;
 
-  /// True when the user signed in via Google (no phone number from Firebase Auth).
-  bool get _isGoogleUser =>
-      FirebaseAuth.instance.currentUser?.phoneNumber == null ||
-      FirebaseAuth.instance.currentUser!.phoneNumber!.isEmpty;
+  /// True when signed in via Google/email (no Firebase phone number).
+  bool get _isGoogleUser {
+    final phone = FirebaseAuth.instance.currentUser?.phoneNumber;
+    return phone == null || phone.isEmpty;
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    // Auto-fill email for Google users
+    final user = FirebaseAuth.instance.currentUser;
+    if (user != null && _isGoogleUser) {
+      _emailCtrl.text = user.email ?? '';
+    }
+  }
 
   @override
   void dispose() {
     _nameCtrl.dispose();
     _phoneCtrl.dispose();
+    _emailCtrl.dispose();
     _upiCtrl.dispose();
     super.dispose();
   }
@@ -49,8 +67,7 @@ class _CompleteProfileScreenState
 
     final user = FirebaseAuth.instance.currentUser!;
     try {
-      // Phone users already have their number from OTP auth.
-      // Google users enter it manually in the form.
+      // Phone: OTP users use Firebase Auth phone; Google users enter manually.
       String phone;
       if (_isGoogleUser) {
         final raw = _phoneCtrl.text.trim();
@@ -59,10 +76,14 @@ class _CompleteProfileScreenState
         phone = user.phoneNumber!;
       }
 
+      // Email: use manually entered value (or auto-filled Google email)
+      final email = _emailCtrl.text.trim();
+
       await UserRepository.createProfile(
         uid: user.uid,
         name: _nameCtrl.text.trim(),
         phone: phone,
+        email: email,
         upiVpa: _upiCtrl.text.trim(),
       );
       await ref.read(authNotifierProvider.notifier).profileCreated();
@@ -97,7 +118,7 @@ class _CompleteProfileScreenState
               ),
               const SizedBox(height: Spacing.xl * 2),
 
-              // ── Name ────────────────────────────────────────────────────
+              // ── Name (required) ──────────────────────────────────────────
               Text('YOUR NAME', style: AppTextStyles.overline()),
               const SizedBox(height: Spacing.sm),
               TextFormField(
@@ -116,14 +137,16 @@ class _CompleteProfileScreenState
               ),
               const SizedBox(height: Spacing.base),
 
-              // ── Phone (Google users only) ────────────────────────────────
+              // ── Phone (required for Google users only) ───────────────────
               if (_isGoogleUser) ...[
                 Text('PHONE NUMBER', style: AppTextStyles.overline()),
                 const SizedBox(height: Spacing.sm),
                 TextFormField(
                   controller: _phoneCtrl,
                   keyboardType: TextInputType.phone,
-                  inputFormatters: [FilteringTextInputFormatter.allow(RegExp(r'[\d+]'))],
+                  inputFormatters: [
+                    FilteringTextInputFormatter.allow(RegExp(r'[\d+]'))
+                  ],
                   style: AppTextStyles.body(),
                   decoration: const InputDecoration(
                     hintText: '+91 98765 43210',
@@ -131,7 +154,9 @@ class _CompleteProfileScreenState
                     helperText: 'Friends can find you by this number',
                   ),
                   validator: (v) {
-                    if (v == null || v.trim().isEmpty) return 'Phone number is required';
+                    if (v == null || v.trim().isEmpty) {
+                      return 'Phone number is required';
+                    }
                     final digits = v.replaceAll(RegExp(r'\D'), '');
                     if (digits.length < 10) return 'Enter a valid phone number';
                     return null;
@@ -140,8 +165,30 @@ class _CompleteProfileScreenState
                 const SizedBox(height: Spacing.base),
               ],
 
-              // ── UPI VPA ─────────────────────────────────────────────────
-              Text('UPI ID (optional)', style: AppTextStyles.overline()),
+              // ── Email (optional, auto-filled for Google users) ───────────
+              Text('EMAIL (OPTIONAL)', style: AppTextStyles.overline()),
+              const SizedBox(height: Spacing.sm),
+              TextFormField(
+                controller: _emailCtrl,
+                // Read-only for Google users (already auto-filled from their account)
+                readOnly: _isGoogleUser && _emailCtrl.text.isNotEmpty,
+                keyboardType: TextInputType.emailAddress,
+                style: AppTextStyles.body(),
+                decoration: InputDecoration(
+                  hintText: 'you@example.com',
+                  prefixIcon: const Icon(Icons.email_outlined),
+                  helperText: _isGoogleUser ? 'Auto-filled from your Google account' : null,
+                ),
+                validator: (v) {
+                  if (v == null || v.trim().isEmpty) return null; // optional
+                  if (!v.contains('@')) return 'Enter a valid email';
+                  return null;
+                },
+              ),
+              const SizedBox(height: Spacing.base),
+
+              // ── UPI VPA (optional) ───────────────────────────────────────
+              Text('UPI ID (OPTIONAL)', style: AppTextStyles.overline()),
               const SizedBox(height: Spacing.sm),
               TextFormField(
                 controller: _upiCtrl,
@@ -188,6 +235,7 @@ class _CompleteProfileScreenState
                       : const Text('Let\'s go →'),
                 ),
               ),
+              const SizedBox(height: Spacing.xl),
             ],
           ),
         ),
@@ -195,4 +243,3 @@ class _CompleteProfileScreenState
     );
   }
 }
-
