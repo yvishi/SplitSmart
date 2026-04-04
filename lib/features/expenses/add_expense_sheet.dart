@@ -1,3 +1,4 @@
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -41,6 +42,8 @@ class _AddExpenseSheetState extends ConsumerState<AddExpenseSheet> {
   String? _paidByUid;
   final Set<String> _selectedMembers = {};
   bool _initialized = false;
+  /// uid → display name cache (loaded from Firestore)
+  final Map<String, String> _memberNames = {};
 
   @override
   void dispose() {
@@ -61,6 +64,23 @@ class _AddExpenseSheetState extends ConsumerState<AddExpenseSheet> {
     _selectedMembers
       ..clear()
       ..addAll(initial.memberUids);
+    _fetchMemberNames(initial.memberUids, currentUid);
+  }
+
+  Future<void> _fetchMemberNames(List<String> uids, String currentUid) async {
+    for (final uid in uids) {
+      if (_memberNames.containsKey(uid)) continue;
+      try {
+        final doc = await FirebaseFirestore.instance
+            .collection('users')
+            .doc(uid)
+            .get();
+        final name = doc.data()?['name'] as String? ?? 'Unknown';
+        if (mounted) setState(() => _memberNames[uid] = name);
+      } catch (_) {
+        if (mounted) setState(() => _memberNames[uid] = 'Unknown');
+      }
+    }
   }
 
   @override
@@ -134,10 +154,8 @@ class _AddExpenseSheetState extends ConsumerState<AddExpenseSheet> {
                     _selectedMembers
                       ..clear()
                       ..addAll(g.memberUids);
-                    if (!_selectedMembers.contains(_paidByUid)) {
-                      _paidByUid = currentUid;
-                    }
                   });
+                  _fetchMemberNames(g.memberUids, currentUid);
                 },
               ),
               const SizedBox(height: Spacing.md),
@@ -255,10 +273,17 @@ class _AddExpenseSheetState extends ConsumerState<AddExpenseSheet> {
                     child: Row(
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        AppAvatar(name: uid, size: 20),
+                        AppAvatar(
+                          name: uid == currentUid
+                              ? 'You'
+                              : (_memberNames[uid] ?? uid.substring(0, 4)),
+                          size: 20,
+                        ),
                         const SizedBox(width: Spacing.xs),
                         Text(
-                          uid == currentUid ? 'You' : uid.substring(0, 6),
+                          uid == currentUid
+                              ? 'You'
+                              : (_memberNames[uid] ?? '...'),
                           style: AppTextStyles.caption(
                             color: sel
                                 ? AppColors.forest
@@ -271,53 +296,7 @@ class _AddExpenseSheetState extends ConsumerState<AddExpenseSheet> {
                 );
               }).toList(),
             ),
-            const SizedBox(height: Spacing.base),
-
-            // ── Paid by ────────────────────────────────────────────────
-            Text('Paid by', style: AppTextStyles.overline()),
-            const SizedBox(height: Spacing.sm),
-            SizedBox(
-              height: 36,
-              child: ListView.builder(
-                scrollDirection: Axis.horizontal,
-                itemCount: members.length,
-                itemBuilder: (_, i) {
-                  final uid = members[i];
-                  final sel = _paidByUid == uid;
-                  return GestureDetector(
-                    onTap: () => setState(() => _paidByUid = uid),
-                    child: AnimatedContainer(
-                      duration: const Duration(milliseconds: 150),
-                      margin: const EdgeInsets.only(right: Spacing.sm),
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: Spacing.md, vertical: Spacing.xs),
-                      decoration: BoxDecoration(
-                        color:
-                            sel ? AppColors.obsidian : AppColors.subtle,
-                        borderRadius:
-                            BorderRadius.circular(AppRadius.full),
-                      ),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          AppAvatar(name: uid, size: 20),
-                          const SizedBox(width: Spacing.xs),
-                          Text(
-                            uid == currentUid ? 'You' : uid.substring(0, 6),
-                            style: AppTextStyles.caption(
-                              color: sel
-                                  ? AppColors.white
-                                  : AppColors.stone,
-                            ).copyWith(fontWeight: FontWeight.w500),
-                          ),
-                        ],
-                      ),
-                    ),
-                  );
-                },
-              ),
-            ),
-            const SizedBox(height: Spacing.lg),
+            const SizedBox(height: Spacing.xl),
 
             // ── Save ───────────────────────────────────────────────────
             SizedBox(
@@ -325,7 +304,6 @@ class _AddExpenseSheetState extends ConsumerState<AddExpenseSheet> {
               child: FilledButton(
                 onPressed: _selectedGroupId != null &&
                         _selectedMembers.isNotEmpty &&
-                        _paidByUid != null &&
                         _amountCtrl.text.isNotEmpty &&
                         _titleCtrl.text.isNotEmpty
                     ? _save
