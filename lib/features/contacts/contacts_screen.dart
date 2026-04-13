@@ -97,8 +97,15 @@ class _ContactsScreenState extends ConsumerState<ContactsScreen> {
       ),
     );
     if (confirmed == true) {
-      await ContactsRepository.removeContact(
-          auth.profile.uid, contact.uid);
+      try {
+        await ContactsRepository.removeContact(auth.profile.uid, contact.uid);
+      } catch (e) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Could not remove contact. Try again.')),
+          );
+        }
+      }
     }
   }
 
@@ -156,19 +163,31 @@ class _AddContactSheetState extends ConsumerState<_AddContactSheet> {
   }
 
   Future<void> _search() async {
+    final raw = _phoneCtrl.text.trim();
+    if (raw.isEmpty) return;
+
     setState(() {
       _searching = true;
       _found = null;
       _error = null;
       _searched = false;
     });
-    final result = await ContactsRepository.findByPhone(_phoneCtrl.text.trim());
-    setState(() {
-      _searching = false;
-      _searched = true;
-      _found = result;
-      if (result == null) _error = 'No user found with that phone number.';
-    });
+
+    try {
+      final result = await ContactsRepository.findByPhone(raw);
+      setState(() {
+        _searching = false;
+        _searched = true;
+        _found = result;
+        if (result == null) _error = 'No user found with that number. Make sure they have registered on SplitSmart.';
+      });
+    } catch (e) {
+      setState(() {
+        _searching = false;
+        _searched = true;
+        _error = 'Search failed. Check your connection and try again.';
+      });
+    }
   }
 
   Future<void> _add() async {
@@ -176,18 +195,30 @@ class _AddContactSheetState extends ConsumerState<_AddContactSheet> {
     final auth = ref.read(authStateProvider);
     if (auth is! AuthAuthenticated) return;
 
-    // Don't add yourself
+    // Don't add yourself.
     if (_found!.uid == auth.profile.uid) {
       setState(() => _error = 'You cannot add yourself.');
       return;
     }
 
-    await ContactsRepository.addContact(auth.profile.uid, _found!.uid);
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('${_found!.name} added to contacts!')),
-      );
-      Navigator.pop(context);
+    // Already a contact?
+    if (auth.profile.contactUids.contains(_found!.uid)) {
+      setState(() => _error = '${_found!.name} is already in your contacts.');
+      return;
+    }
+
+    try {
+      await ContactsRepository.addContact(auth.profile.uid, _found!.uid);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('${_found!.name} added to contacts!')),
+        );
+        Navigator.pop(context);
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() => _error = 'Could not add contact. Check your connection.');
+      }
     }
   }
 
@@ -228,8 +259,9 @@ class _AddContactSheetState extends ConsumerState<_AddContactSheet> {
                     controller: _phoneCtrl,
                     keyboardType: TextInputType.phone,
                     decoration: const InputDecoration(
-                      hintText: '+91 98765 43210',
+                      hintText: '98765 43210 or +91…',
                       prefixIcon: Icon(Icons.phone_outlined),
+                      helperText: 'Enter any format — we\'ll handle the rest',
                     ),
                     onSubmitted: (_) => _search(),
                   ),

@@ -35,6 +35,11 @@ class Expense {
   final DateTime updatedAt;
   final String createdByUid;
 
+  /// UIDs of participants who have paid their share via a settlement.
+  /// Their share is zeroed out in all balance calculations, and the expense
+  /// is hidden from their own recent-expenses view.
+  final List<String> settledUids;
+
   const Expense({
     required this.id,
     required this.title,
@@ -55,6 +60,7 @@ class Expense {
     required this.createdAt,
     required this.updatedAt,
     required this.createdByUid,
+    this.settledUids = const [],
   });
 
   factory Expense.fromDoc(DocumentSnapshot doc) {
@@ -89,6 +95,7 @@ class Expense {
       createdAt: (d['createdAt'] as Timestamp?)?.toDate() ?? DateTime.now(),
       updatedAt: (d['updatedAt'] as Timestamp?)?.toDate() ?? DateTime.now(),
       createdByUid: d['createdByUid'] as String? ?? '',
+      settledUids: List<String>.from(d['settledUids'] ?? []),
     );
   }
 
@@ -111,6 +118,7 @@ class Expense {
         'createdAt': Timestamp.fromDate(createdAt),
         'updatedAt': Timestamp.fromDate(updatedAt),
         'createdByUid': createdByUid,
+        'settledUids': settledUids,
       };
 
   double get amountPerPerson =>
@@ -118,9 +126,10 @@ class Expense {
 
   double get grossAmount => totalAmount * (1 + taxFraction + tipFraction);
 
-  /// Returns the share owed by [uid] for this expense.
-  /// Handles all split types.
-  double shareForUid(String uid) {
+  /// Returns the GROSS share owed by [uid], ignoring [settledUids].
+  /// Used by the settlements balance provider which handles settlement
+  /// deductions separately via the settlements collection.
+  double grossShareForUid(String uid) {
     if (!participantUids.contains(uid)) return 0;
     switch (splitType) {
       case SplitType.equal:
@@ -131,21 +140,55 @@ class Expense {
         final pct = percentages[uid] ?? 0;
         return totalAmount * pct / 100;
       case SplitType.itemBased:
-        // Sum items assigned to this uid
         return items
             .where((item) => item.assignedUids.contains(uid))
             .fold(0.0, (sum, item) => sum + item.price);
     }
   }
 
-  /// Returns how much [uid] owes (positive) or is owed (negative) for this expense.
-  /// Positive = uid owes money. Negative = uid is owed money.
-  double netForUid(String uid) {
-    final share = shareForUid(uid);
-    if (paidByUid == uid) {
-      // Payer lent everyone else their share, gets back: totalAmount - their own share
-      return share - totalAmount;
+  /// Returns the share owed by [uid] for this expense.
+  /// Returns 0 if [uid] has settled their portion.
+  double shareForUid(String uid) {
+    if (!participantUids.contains(uid)) return 0;
+    // Participant has already paid via a settlement — no longer owes anything.
+    if (settledUids.contains(uid)) return 0;
+    switch (splitType) {
+      case SplitType.equal:
+        return amountPerPerson;
+      case SplitType.unequal:
+        return unequalAmounts[uid] ?? 0;
+      case SplitType.percentage:
+        final pct = percentages[uid] ?? 0;
+        return totalAmount * pct / 100;
+      case SplitType.itemBased:
+        return items
+            .where((item) => item.assignedUids.contains(uid))
+            .fold(0.0, (sum, item) => sum + item.price);
     }
-    return share;
   }
+
+  /// Returns how much [uid] owes (positive) or is owed (negative).
+  ///
+  /// For a **payer**: returns the negative sum of what non-settled
+  /// participants still owe them (decreases as people settle).
+  ///
+  /// For a **participant**: returns their share (0 if settled).
+  double netForUid(String uid) {
+    if (!participantUids.contains(uid)) return 0;
+    // Settled participant: clear ledger for them.
+    if (settledUids.contains(uid)) return 0;
+
+    if (paidByUid == uid) {
+      // Sum only what non-settled participants still owe.
+      final stillOwed = participantUids
+          .where((p) => p != uid && !settledUids.contains(p))
+          .fold(0.0, (sum, p) => sum + shareForUid(p));
+      return -stillOwed; // negative = owed to payer
+    }
+    return shareForUid(uid); // positive = participant owes payer
+  }
+
+  /// True when this expense has zero outstanding balance for [uid]
+  /// (either they settled or they are the payer and everyone else settled).
+  bool isFullySettledFor(String uid) => netForUid(uid) == 0;
 }

@@ -10,6 +10,7 @@ import '../../core/theme/spacing.dart';
 import '../../core/utils/haptics.dart';
 import '../../features/auth/auth_notifier.dart';
 import '../../features/auth/user_repository.dart';
+import '../../features/contacts/contacts_repository.dart';
 import '../../shared/widgets/app_avatar.dart';
 import '../../shared/widgets/app_bottom_sheet.dart';
 
@@ -76,9 +77,9 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
     await Haptics.lightTap();
 
     final upiRaw = _upiCtrl.text.trim();
-    final upiError = upiRaw.isNotEmpty && !upiRaw.contains('@');
-    if (upiError) {
+    if (upiRaw.isNotEmpty && !upiRaw.contains('@')) {
       setState(() => _saving = false);
+      if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text('UPI ID must contain @',
@@ -94,7 +95,7 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
     if (_isGoogleUser) {
       final rawPhone = _phoneCtrl.text.trim();
       if (rawPhone.isNotEmpty) {
-        phoneUpdate = rawPhone.startsWith('+') ? rawPhone : '+91$rawPhone';
+        phoneUpdate = ContactsRepository.normalizePhone(rawPhone);
       }
     }
 

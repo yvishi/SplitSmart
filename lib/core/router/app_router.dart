@@ -9,6 +9,7 @@ import '../../features/auth/complete_profile_screen.dart';
 import '../../features/auth/auth_notifier.dart';
 import '../../features/home/home_screen.dart';
 import '../../features/groups/groups_screen.dart';
+import '../../features/groups/group_detail_screen.dart';
 import '../../features/settlements/settlements_screen.dart';
 import '../../features/scanner/scanner_screen.dart';
 import '../../features/scanner/item_review_screen.dart';
@@ -100,6 +101,14 @@ final appRouterProvider = Provider<GoRouter>((ref) {
       GoRoute(
         path: AppRoutes.groups,
         builder: (_, __) => const GroupsScreen(),
+        routes: [
+          GoRoute(
+            path: ':id',
+            builder: (_, state) => GroupDetailScreen(
+              groupId: state.pathParameters['id']!,
+            ),
+          ),
+        ],
       ),
       GoRoute(
         path: AppRoutes.settlements,

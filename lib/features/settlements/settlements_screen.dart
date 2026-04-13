@@ -1,81 +1,136 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/theme/app_colors.dart';
 import '../../core/theme/app_text_styles.dart';
 import '../../core/theme/spacing.dart';
 import '../../core/utils/currency_formatter.dart';
-import '../../features/settlements/dag_solver.dart';
+import '../../shared/models/settlement.dart';
 import '../../shared/widgets/app_avatar.dart';
+import '../../shared/widgets/skeleton_loader.dart';
+import 'settlements_provider.dart';
 import 'upi_settle_sheet.dart';
 
-class SettlementsScreen extends StatelessWidget {
+class SettlementsScreen extends ConsumerWidget {
   const SettlementsScreen({super.key});
 
   @override
-  Widget build(BuildContext context) {
-    // Build net balances from sample data (replace with Riverpod+Isar)
-    final contributions = [
-      ExpenseContribution(paidByUid: '1', participantUids: ['1', '2', '3', '4'], totalAmount: 450),
-      ExpenseContribution(paidByUid: '2', participantUids: ['1', '2', '3'], totalAmount: 810),
-      ExpenseContribution(paidByUid: '3', participantUids: ['1', '2', '3', '4'], totalAmount: 120),
-      ExpenseContribution(paidByUid: '1', participantUids: ['1', '4'], totalAmount: 340),
-    ];
-    final balances = DagSolver.computeNetBalances(contributions);
-    final transactions = DagSolver.minimize(balances);
-    final naiveCount = contributions.fold<int>(
-        0, (acc, e) => acc + e.participantUids.length - 1);
+  Widget build(BuildContext context, WidgetRef ref) {
+    final stateAsync = ref.watch(settlementsStateProvider);
 
     return Scaffold(
       backgroundColor: AppColors.chalk,
       appBar: AppBar(
         title: const Text('Settlements'),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.filter_list_outlined),
-            onPressed: () {},
-          ),
-        ],
       ),
-      body: ListView(
-        padding: const EdgeInsets.symmetric(
-            horizontal: Spacing.base, vertical: Spacing.sm),
-        children: [
-          // ── DAG hero banner ──────────────────────────────────────────────
-          _DagBanner(
-            minimizedCount: transactions.length,
-            naiveCount: naiveCount,
-          ),
-          const SizedBox(height: Spacing.lg),
-
-          // ── You owe ──────────────────────────────────────────────────────
-          Text('YOU OWE', style: AppTextStyles.overline()),
-          const SizedBox(height: Spacing.sm),
-          ..._sampleDebts
-              .where((d) => !d.isOwedToYou)
-              .map((d) => _BalanceRow(debt: d, onSettle: () {
-                    UpiSettleSheet.show(context, debt: d);
-                  })),
-          const SizedBox(height: Spacing.lg),
-
-          // ── Owed to you ──────────────────────────────────────────────────
-          Text('OWED TO YOU', style: AppTextStyles.overline()),
-          const SizedBox(height: Spacing.sm),
-          ..._sampleDebts
-              .where((d) => d.isOwedToYou)
-              .map((d) => _BalanceRow(debt: d, onNudge: () {})),
-          const SizedBox(height: Spacing.base),
-
-          // ── History link ─────────────────────────────────────────────────
-          Center(
-            child: TextButton(
-              onPressed: () {},
-              child: Text(
-                'View 12 past settlements →',
-                style: AppTextStyles.body(color: AppColors.forest)
-                    .copyWith(fontSize: 13),
-              ),
+      body: stateAsync.when(
+        loading: () => const _SettlementsSkeleton(),
+        error: (err, _) => Center(
+          child: Padding(
+            padding: const EdgeInsets.all(Spacing.xl),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Icon(Icons.error_outline,
+                    color: AppColors.ember, size: 40),
+                const SizedBox(height: Spacing.md),
+                Text('Could not load settlements',
+                    style: AppTextStyles.bodyMedium()),
+                const SizedBox(height: Spacing.sm),
+                Text('$err',
+                    style: AppTextStyles.caption(color: AppColors.stone),
+                    textAlign: TextAlign.center),
+              ],
             ),
           ),
-        ],
+        ),
+        data: (state) {
+          final hasAny =
+              state.youOwe.isNotEmpty || state.owedToYou.isNotEmpty;
+
+          return RefreshIndicator(
+            color: AppColors.forest,
+            onRefresh: () async => ref.refresh(settlementsStateProvider),
+            child: ListView(
+              padding: const EdgeInsets.symmetric(
+                  horizontal: Spacing.base, vertical: Spacing.sm),
+              children: [
+                // ── DAG hero banner ─────────────────────────────────────
+                if (hasAny)
+                  _DagBanner(
+                    minimizedCount: state.minimizedCount,
+                    naiveCount: state.naiveCount,
+                  ),
+                if (hasAny) const SizedBox(height: Spacing.lg),
+
+                // ── YOU OWE section ─────────────────────────────────────
+                if (state.youOwe.isNotEmpty) ...[
+                  Text('YOU OWE', style: AppTextStyles.overline()),
+                  const SizedBox(height: Spacing.sm),
+                  ...state.youOwe.map((debt) => _BalanceRow(
+                        debt: debt,
+                        onSettle: () =>
+                            UpiSettleSheet.show(context, ref: ref, debt: debt),
+                      )),
+                  const SizedBox(height: Spacing.lg),
+                ],
+
+                // ── OWED TO YOU section ─────────────────────────────────
+                if (state.owedToYou.isNotEmpty) ...[
+                  Text('OWED TO YOU', style: AppTextStyles.overline()),
+                  const SizedBox(height: Spacing.sm),
+                  ...state.owedToYou.map((debt) => _BalanceRow(
+                        debt: debt,
+                        onNudge: () {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            SnackBar(
+                              content: Text(
+                                  'Reminder sent to ${debt.otherName} 🔔'),
+                              backgroundColor: AppColors.obsidian,
+                            ),
+                          );
+                        },
+                      )),
+                  const SizedBox(height: Spacing.base),
+                ],
+
+                // ── All settled state ───────────────────────────────────
+                if (!hasAny) ...[
+                  const SizedBox(height: 60),
+                  Center(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Container(
+                          width: 72,
+                          height: 72,
+                          decoration: BoxDecoration(
+                            color: AppColors.mint,
+                            borderRadius:
+                                BorderRadius.circular(AppRadius.full),
+                          ),
+                          child: const Icon(Icons.check_circle_outline,
+                              color: AppColors.forest, size: 36),
+                        ),
+                        const SizedBox(height: Spacing.base),
+                        Text('All settled up! 🎉',
+                            style: AppTextStyles.subtitle()),
+                        const SizedBox(height: Spacing.sm),
+                        Text('No pending debts with anyone.',
+                            style:
+                                AppTextStyles.caption(color: AppColors.stone)),
+                      ],
+                    ),
+                  ),
+                ],
+
+                // ── Settlement history ──────────────────────────────────
+                const SizedBox(height: Spacing.lg),
+                _SettlementHistory(),
+                const SizedBox(height: 80),
+              ],
+            ),
+          );
+        },
       ),
     );
   }
@@ -95,14 +150,12 @@ class _DagBanner extends StatelessWidget {
       decoration: BoxDecoration(
         color: AppColors.white,
         borderRadius: BorderRadius.circular(AppRadius.md),
-        border: Border(
+        border: const Border(
           left: BorderSide(color: AppColors.forest, width: 3),
         ),
         boxShadow: [
           BoxShadow(
-              color: AppColors.border,
-              blurRadius: 0,
-              spreadRadius: 0.5),
+              color: AppColors.border, blurRadius: 0, spreadRadius: 0.5),
         ],
       ),
       child: Row(
@@ -124,7 +177,6 @@ class _DagBanner extends StatelessWidget {
             ),
           ),
           const SizedBox(width: Spacing.sm),
-          // Minimal node graph icon
           _NodeGraphIcon(),
         ],
       ),
@@ -174,14 +226,16 @@ class _GraphPainter extends CustomPainter {
 // ─── Balance row ─────────────────────────────────────────────────────────────
 class _BalanceRow extends StatelessWidget {
   const _BalanceRow({required this.debt, this.onSettle, this.onNudge});
-  final _DebtSample debt;
+
+  final PersonDebt debt;
   final VoidCallback? onSettle;
   final VoidCallback? onNudge;
 
   @override
   Widget build(BuildContext context) {
     final bgColor = debt.isOwedToYou ? AppColors.mint : AppColors.rose;
-    final amtColor = debt.isOwedToYou ? AppColors.forest : AppColors.ember;
+    final amtColor =
+        debt.isOwedToYou ? AppColors.forest : AppColors.ember;
 
     return Padding(
       padding: const EdgeInsets.only(bottom: Spacing.sm),
@@ -193,16 +247,21 @@ class _BalanceRow extends StatelessWidget {
         ),
         child: Row(
           children: [
-            AppAvatar(name: debt.personName, size: 36),
+            AppAvatar(name: debt.otherName, size: 36),
             const SizedBox(width: Spacing.md),
             Expanded(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(debt.personName, style: AppTextStyles.bodyMedium()),
+                  Text(debt.otherName,
+                      style: AppTextStyles.bodyMedium()),
                   const SizedBox(height: 2),
-                  Text(debt.context,
-                      style: AppTextStyles.caption()),
+                  Text(
+                    debt.isOwedToYou
+                        ? 'owes you'
+                        : 'you owe',
+                    style: AppTextStyles.caption(),
+                  ),
                 ],
               ),
             ),
@@ -226,9 +285,8 @@ class _BalanceRow extends StatelessWidget {
                             BorderRadius.circular(AppRadius.full),
                       ),
                       child: Text(
-                        'Settle via UPI →',
-                        style: AppTextStyles.caption(
-                                color: AppColors.white)
+                        'Settle →',
+                        style: AppTextStyles.caption(color: AppColors.white)
                             .copyWith(fontWeight: FontWeight.w600),
                       ),
                     ),
@@ -243,13 +301,12 @@ class _BalanceRow extends StatelessWidget {
                         color: Colors.transparent,
                         borderRadius:
                             BorderRadius.circular(AppRadius.full),
-                        border: Border.all(
-                            color: AppColors.stone, width: 0.5),
+                        border:
+                            Border.all(color: AppColors.stone, width: 0.5),
                       ),
                       child: Text(
                         'Nudge 🔔',
-                        style: AppTextStyles.caption(
-                            color: AppColors.stone),
+                        style: AppTextStyles.caption(color: AppColors.stone),
                       ),
                     ),
                   ),
@@ -262,40 +319,114 @@ class _BalanceRow extends StatelessWidget {
   }
 }
 
-// ─── Sample data ─────────────────────────────────────────────────────────────
-class _DebtSample {
-  final String personName, context, upiVpa;
-  final double amount;
-  final bool isOwedToYou;
-  const _DebtSample({
-    required this.personName,
-    required this.context,
-    required this.upiVpa,
-    required this.amount,
-    required this.isOwedToYou,
-  });
+// ─── Settlement history ───────────────────────────────────────────────────────
+class _SettlementHistory extends ConsumerWidget {
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final historyAsync = ref.watch(userSettlementsProvider);
+
+    return historyAsync.when(
+      loading: () => const SizedBox.shrink(),
+      error: (_, __) => const SizedBox.shrink(),
+      data: (settlements) {
+        if (settlements.isEmpty) return const SizedBox.shrink();
+
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('HISTORY', style: AppTextStyles.overline()),
+            const SizedBox(height: Spacing.sm),
+            ...settlements.take(5).map((s) => _HistoryRow(settlement: s)),
+          ],
+        );
+      },
+    );
+  }
 }
 
-const _sampleDebts = [
-  _DebtSample(
-    personName: 'Priya Sharma',
-    context: 'Goa Trip food',
-    upiVpa: 'priya.sharma@okaxis',
-    amount: 340,
-    isOwedToYou: false,
-  ),
-  _DebtSample(
-    personName: 'Rahul Mehta',
-    context: 'Petrol split',
-    upiVpa: 'rahul.m@okicici',
-    amount: 120,
-    isOwedToYou: false,
-  ),
-  _DebtSample(
-    personName: 'Arjun Kapoor',
-    context: 'Hotel booking',
-    upiVpa: 'arjun.k@ybl',
-    amount: 810,
-    isOwedToYou: true,
-  ),
-];
+class _HistoryRow extends StatelessWidget {
+  const _HistoryRow({required this.settlement});
+  final Settlement settlement;
+
+  @override
+  Widget build(BuildContext context) {
+    final isConfirmed = settlement.status.name == 'confirmed';
+    return Padding(
+      padding: const EdgeInsets.only(bottom: Spacing.sm),
+      child: Container(
+        padding: const EdgeInsets.symmetric(
+            horizontal: Spacing.base, vertical: Spacing.md),
+        decoration: BoxDecoration(
+          color: AppColors.white,
+          borderRadius: BorderRadius.circular(AppRadius.md),
+        ),
+        child: Row(
+          children: [
+            Icon(
+              isConfirmed
+                  ? Icons.check_circle_outline
+                  : Icons.hourglass_empty_outlined,
+              color: isConfirmed ? AppColors.forest : AppColors.stone,
+              size: 20,
+            ),
+            const SizedBox(width: Spacing.md),
+            Expanded(
+              child: Text(
+                CurrencyFormatter.format(settlement.amount),
+                style: AppTextStyles.bodyMedium(),
+              ),
+            ),
+            Text(
+              isConfirmed ? 'Settled' : 'Pending',
+              style: AppTextStyles.caption(
+                color: isConfirmed ? AppColors.forest : AppColors.stone,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// ─── Loading skeleton ─────────────────────────────────────────────────────────
+class _SettlementsSkeleton extends StatelessWidget {
+  const _SettlementsSkeleton();
+
+  @override
+  Widget build(BuildContext context) {
+    return ListView(
+      padding: const EdgeInsets.symmetric(
+          horizontal: Spacing.base, vertical: Spacing.sm),
+      children: [
+        // DAG banner skeleton
+        SkeletonLoader(
+          child: Container(
+            height: 64,
+            decoration: BoxDecoration(
+              color: AppColors.white,
+              borderRadius: BorderRadius.circular(AppRadius.md),
+            ),
+          ),
+        ),
+        const SizedBox(height: Spacing.lg),
+        // Section label
+        SkeletonLoader(child: SkeletonBox(width: 80, height: 11)),
+        const SizedBox(height: Spacing.sm),
+        // Balance rows
+        for (int i = 0; i < 3; i++) ...[
+          SkeletonLoader(
+            child: Container(
+              height: 72,
+              decoration: BoxDecoration(
+                color: AppColors.white,
+                borderRadius: BorderRadius.circular(AppRadius.md),
+              ),
+            ),
+          ),
+          const SizedBox(height: Spacing.sm),
+        ],
+      ],
+    );
+  }
+}

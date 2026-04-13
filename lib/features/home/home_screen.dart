@@ -19,6 +19,7 @@ class HomeScreen extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final recentExpensesAsync = ref.watch(recentExpensesProvider);
+    final balanceAsync = ref.watch(netBalanceSummaryProvider);
 
     return Scaffold(
       backgroundColor: AppColors.chalk,
@@ -29,14 +30,25 @@ class HomeScreen extends ConsumerWidget {
             Expanded(
               child: RefreshIndicator(
                 color: AppColors.forest,
-                onRefresh: () async => ref.refresh(recentExpensesProvider),
+                onRefresh: () async {
+                  ref.refresh(recentExpensesProvider);
+                  ref.refresh(netBalanceSummaryProvider);
+                },
                 child: ListView(
                   children: [
-                    // Balance hero (DAG integration pending)
-                    const BalanceHeroCard(
-                      netBalance: 0,
-                      totalOwedToYou: 0,
-                      totalYouOwe: 0,
+                    // ── Balance hero ──────────────────────────────────────
+                    balanceAsync.when(
+                      loading: () => const BalanceCardSkeleton(),
+                      error: (_, __) => const BalanceHeroCard(
+                        netBalance: 0,
+                        totalOwedToYou: 0,
+                        totalYouOwe: 0,
+                      ),
+                      data: (summary) => BalanceHeroCard(
+                        netBalance: summary.netBalance,
+                        totalOwedToYou: summary.totalOwedToYou,
+                        totalYouOwe: summary.totalYouOwe,
+                      ),
                     ),
 
                     _QuickActions(),

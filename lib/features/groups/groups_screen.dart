@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 import '../../core/theme/app_colors.dart';
 import '../../core/theme/app_text_styles.dart';
 import '../../core/theme/spacing.dart';
@@ -10,6 +11,7 @@ import '../../shared/widgets/skeleton_loader.dart';
 import '../home/home_providers.dart';
 import '../auth/auth_notifier.dart';
 import '../contacts/contacts_provider.dart';
+import 'group_providers.dart';
 import 'groups_repository.dart';
 
 class GroupsScreen extends ConsumerStatefulWidget {
@@ -146,25 +148,29 @@ class _GroupsScreenState extends ConsumerState<GroupsScreen> {
 }
 
 // ─── Group card ──────────────────────────────────────────────────────────────
-class _GroupCard extends StatelessWidget {
+class _GroupCard extends ConsumerWidget {
   const _GroupCard({required this.group});
   final Group group;
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     const netBalance = 0.0; // PENDING DAG SOLVER HOOK
     final balanceColor = netBalance >= 0 ? AppColors.forest : AppColors.ember;
 
+    final membersKey = group.memberUids.join(',');
+    final membersAsync = ref.watch(usersByUidsProvider(membersKey));
+    final memberNames = membersAsync.valueOrNull?.map((u) => u.name).toList()
+        ?? List.filled(group.memberUids.length, '?');
+
     return Card(
       child: InkWell(
-        onTap: () {},
+        onTap: () => context.push('/groups/${group.id}'),
         borderRadius: BorderRadius.circular(AppRadius.md),
         child: Padding(
           padding: const EdgeInsets.all(Spacing.base),
           child: Row(
             children: [
-              // Avatar stack placeholder
-              AvatarStack(names: const ['+', '+', '+'], size: 28),
+              AvatarStack(names: memberNames, size: 28),
               const SizedBox(width: Spacing.md),
 
               // Name + type badge
@@ -186,7 +192,7 @@ class _GroupCard extends StatelessWidget {
                     ),
                     const SizedBox(height: 3),
                     Text(
-                      '${group.memberUids.length} members',
+                      '${group.memberUids.length} member${group.memberUids.length == 1 ? '' : 's'}',
                       style: AppTextStyles.caption(),
                     ),
                   ],
@@ -198,7 +204,7 @@ class _GroupCard extends StatelessWidget {
               Column(
                 crossAxisAlignment: CrossAxisAlignment.end,
                 children: [
-                   Text(
+                  Text(
                     CurrencyFormatter.format(netBalance.abs()),
                     style: AppTextStyles.amountMono(color: balanceColor),
                   ),
@@ -482,13 +488,21 @@ class _CreateGroupSheetState extends ConsumerState<_CreateGroupSheet> {
       return;
     }
 
-    await GroupsRepository.createGroup(
-      name: _nameCtrl.text.trim(),
-      type: _type,
-      creatorUid: auth.profile.uid,
-      memberUids: _selectedUids.toList(),  // all selected contacts included atomically
-    );
-
-    if (mounted) Navigator.pop(context);
+    try {
+      await GroupsRepository.createGroup(
+        name: _nameCtrl.text.trim(),
+        type: _type,
+        creatorUid: auth.profile.uid,
+        memberUids: _selectedUids.toList(),
+      );
+      if (mounted) Navigator.pop(context);
+    } catch (e) {
+      if (mounted) {
+        setState(() => _saving = false);
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Could not create group. Check your connection.')),
+        );
+      }
+    }
   }
 }

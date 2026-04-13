@@ -1,47 +1,52 @@
 import 'package:flutter/material.dart';
-import 'package:url_launcher/url_launcher.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/theme/app_colors.dart';
 import '../../core/theme/app_text_styles.dart';
 import '../../core/theme/spacing.dart';
 import '../../core/utils/currency_formatter.dart';
 import '../../core/utils/haptics.dart';
+import '../../shared/models/settlement.dart';
 import '../../shared/widgets/app_avatar.dart';
 import '../../shared/widgets/app_bottom_sheet.dart';
+import '../auth/auth_notifier.dart';
+import '../home/home_providers.dart';
+import 'settlements_provider.dart';
+import 'settlements_repository.dart';
 
-/// UPI Settle Up bottom sheet — the trust + conversion screen.
+/// UPI Settle Up bottom sheet.
 ///
-/// Features:
-///  • Shows recipient avatar, name, UPI VPA, and amount
-///  • Detects installed UPI apps (GPay, PhonePe, Paytm) via canLaunchUrl
-///  • Pre-fills amount and VPA in the UPI deep-link
-///  • Heavy haptic on successful settlement
-///  • Trust note: "We don't handle payments — your UPI app does"
-class UpiSettleSheet extends StatefulWidget {
+/// Shows the recipient, amount, a UPI app selector (dummy — opens deep-link),
+/// and a "Mark as settled" button that writes a confirmed [Settlement] to
+/// Firestore and refreshes the balance providers.
+class UpiSettleSheet extends ConsumerStatefulWidget {
   const UpiSettleSheet({super.key, required this.debt});
 
-  final UpiDebtInfo debt;
+  final PersonDebt debt;
 
-  static Future<void> show(BuildContext context,
-      {required dynamic debt}) {
+  /// Opens the sheet. [ref] is used to refresh providers after settling.
+  static Future<void> show(
+    BuildContext context, {
+    required WidgetRef ref,
+    required PersonDebt debt,
+  }) {
     return AppBottomSheet.show(
       context,
-      child: UpiSettleSheet(
-        debt: UpiDebtInfo(
-          personName: debt.personName as String,
-          upiVpa: debt.upiVpa as String,
-          amount: debt.amount as double,
-        ),
+      child: ProviderScope(
+        parent: ProviderScope.containerOf(context),
+        child: UpiSettleSheet(debt: debt),
       ),
     );
   }
 
   @override
-  State<UpiSettleSheet> createState() => _UpiSettleSheetState();
+  ConsumerState<UpiSettleSheet> createState() => _UpiSettleSheetState();
 }
 
-class _UpiSettleSheetState extends State<UpiSettleSheet> {
+class _UpiSettleSheetState extends ConsumerState<UpiSettleSheet> {
   _UpiApp _selectedApp = _UpiApp.gpay;
   final _noteCtrl = TextEditingController();
+  bool _saving = false;
+  String? _errorMessage;
 
   @override
   void dispose() {
@@ -49,49 +54,152 @@ class _UpiSettleSheetState extends State<UpiSettleSheet> {
     super.dispose();
   }
 
-  // ─── UPI deep-link builder ────────────────────────────────────────────────
-  // Spec: upi://pay?pa=VPA&pn=Name&am=Amount&tn=Note&cu=INR
-  Uri _buildUpiUri() {
-    final amount = widget.debt.amount.toStringAsFixed(2);
-    final note = _noteCtrl.text.trim().isEmpty
-        ? 'SplitSmart settlement'
-        : _noteCtrl.text.trim();
-    return Uri.parse(
-      'upi://pay'
-      '?pa=${widget.debt.upiVpa}'
-      '&pn=${Uri.encodeComponent(widget.debt.personName)}'
-      '&am=$amount'
-      '&tn=${Uri.encodeComponent(note)}'
-      '&cu=INR',
+  Future<void> _openUpi() async {
+    // On web canLaunchUrl for upi:// always returns false.
+    // We show a friendly dummy simulation instead.
+    await Haptics.lightTap();
+    if (!mounted) return;
+    _showUpiSimulationDialog();
+  }
+
+  void _showUpiSimulationDialog() {
+    showDialog(
+      context: context,
+      builder: (_) => AlertDialog(
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(AppRadius.lg),
+        ),
+        title: Row(
+          children: [
+            Text(_selectedApp.emoji,
+                style: const TextStyle(fontSize: 22)),
+            const SizedBox(width: 8),
+            Text(_selectedApp.label,
+                style: AppTextStyles.subtitle()),
+          ],
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'Paying ${CurrencyFormatter.format(widget.debt.amount)} to ${widget.debt.otherName}',
+              style: AppTextStyles.body(),
+            ),
+            const SizedBox(height: Spacing.sm),
+            Text(
+              'UPI ID: ${widget.debt.otherUpiVpa.isEmpty ? 'Not set' : widget.debt.otherUpiVpa}',
+              style: AppTextStyles.caption(color: AppColors.stone),
+            ),
+            const SizedBox(height: Spacing.base),
+            Container(
+              padding: const EdgeInsets.all(Spacing.md),
+              decoration: BoxDecoration(
+                color: AppColors.mint,
+                borderRadius: BorderRadius.circular(AppRadius.md),
+              ),
+              child: Text(
+                '🔧  Payment gateway integration coming soon.\nTap "Mark as Settled" after completing payment manually.',
+                style: AppTextStyles.caption(color: AppColors.forest),
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: Text('Close',
+                style: AppTextStyles.body(color: AppColors.stone)),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(
+              backgroundColor: AppColors.forest,
+            ),
+            onPressed: () {
+              Navigator.of(context).pop();
+              _markSettled();
+            },
+            child: const Text('Mark Settled'),
+          ),
+        ],
+      ),
     );
   }
 
-  Future<void> _openUpi() async {
-    final uri = _buildUpiUri();
-    final canLaunch = await canLaunchUrl(uri);
-    if (!mounted) return;
+  // ─── Write settlement to Firestore ────────────────────────────────────────
+  Future<void> _markSettled() async {
+    if (_saving) return;
+    setState(() => _saving = true);
 
-    if (canLaunch) {
-      await Haptics.settlement(); // Heavy haptic — the money moment
-      await launchUrl(uri);
-    } else {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            'No UPI app found. Install GPay, PhonePe, or Paytm.',
-            style: AppTextStyles.body(color: AppColors.white),
-          ),
-          backgroundColor: AppColors.obsidian,
+    final auth = ref.read(authStateProvider);
+    if (auth is! AuthAuthenticated) {
+      setState(() => _saving = false);
+      return;
+    }
+
+    try {
+      await Haptics.settlement();
+
+      final currentUid = auth.profile.uid;
+      final now = DateTime.now();
+
+      // 1. Write the settlement record
+      await SettlementsRepository.createSettlement(
+        Settlement(
+          id: '',
+          fromUid: currentUid,
+          toUid: widget.debt.otherUid,
+          amount: widget.debt.amount,
+          status: SettlementStatus.confirmed,
+          expenseIds: const [],
+          note: _noteCtrl.text.trim().isEmpty ? null : _noteCtrl.text.trim(),
+          upiTxnId: null,
+          createdAt: now,
+          settledAt: now,
         ),
       );
-    }
-  }
 
-  Future<void> _markSettled() async {
-    await Haptics.settlement();
-    await Future.delayed(const Duration(milliseconds: 600));
-    if (mounted) {
-      Navigator.of(context).pop(true); // signals settled
+      // 2. Bidirectionally mark settled shares and delete fully-settled expenses.
+      //    Clears debts in both directions so neither user sees phantom balances.
+      await SettlementsRepository.settleUpBetweenUsers(
+        debtorUid: currentUid,
+        creditorUid: widget.debt.otherUid,
+      );
+
+      // 3. Refresh all live balance providers
+      ref.invalidate(settlementsStateProvider);
+      ref.invalidate(netBalanceSummaryProvider);
+      ref.invalidate(userSettlementsProvider);
+      ref.invalidate(recentExpensesProvider);
+
+      if (mounted) {
+        Navigator.of(context).pop(true);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Row(
+              children: [
+                const Icon(Icons.check_circle_outline,
+                    color: Colors.white, size: 18),
+                const SizedBox(width: 8),
+                Text('Settled with ${widget.debt.otherName}! '
+                    'All shared expenses updated.'),
+              ],
+            ),
+            backgroundColor: AppColors.forest,
+            duration: const Duration(seconds: 3),
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() => _saving = false);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Failed to record settlement. Try again.'),
+            backgroundColor: AppColors.ember,
+          ),
+        );
+      }
     }
   }
 
@@ -102,17 +210,23 @@ class _UpiSettleSheetState extends State<UpiSettleSheet> {
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         // ── Recipient ────────────────────────────────────────────────────
-        Center(
-          child: AppAvatar(name: widget.debt.personName, size: 48),
-        ),
+        Center(child: AppAvatar(name: widget.debt.otherName, size: 56)),
         const SizedBox(height: Spacing.sm),
         Center(
-          child: Text(widget.debt.personName,
+          child: Text(widget.debt.otherName,
               style: AppTextStyles.subtitle()),
         ),
         Center(
-          child: Text(widget.debt.upiVpa,
-              style: AppTextStyles.caption()),
+          child: Text(
+            widget.debt.otherUpiVpa.isEmpty
+                ? 'UPI not set'
+                : widget.debt.otherUpiVpa,
+            style: AppTextStyles.caption(
+              color: widget.debt.otherUpiVpa.isEmpty
+                  ? AppColors.ember
+                  : AppColors.stone,
+            ),
+          ),
         ),
         const SizedBox(height: Spacing.base),
 
@@ -120,7 +234,7 @@ class _UpiSettleSheetState extends State<UpiSettleSheet> {
         Center(
           child: Column(
             children: [
-              Text('AMOUNT', style: AppTextStyles.overline()),
+              Text('YOU OWE', style: AppTextStyles.overline()),
               const SizedBox(height: 4),
               Text(
                 CurrencyFormatter.format(widget.debt.amount),
@@ -152,16 +266,14 @@ class _UpiSettleSheetState extends State<UpiSettleSheet> {
                     color: AppColors.white,
                     borderRadius: BorderRadius.circular(AppRadius.md),
                     border: Border.all(
-                      color: selected
-                          ? AppColors.forest
-                          : AppColors.border,
+                      color: selected ? AppColors.forest : AppColors.border,
                       width: selected ? 1.5 : 0.5,
                     ),
                   ),
                   child: Column(
                     children: [
                       Text(app.emoji,
-                          style: const TextStyle(fontSize: 24)),
+                          style: const TextStyle(fontSize: 22)),
                       const SizedBox(height: 4),
                       Text(
                         app.label,
@@ -171,6 +283,8 @@ class _UpiSettleSheetState extends State<UpiSettleSheet> {
                               : AppColors.stone,
                         ).copyWith(fontWeight: FontWeight.w600),
                         textAlign: TextAlign.center,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
                       ),
                     ],
                   ),
@@ -191,36 +305,47 @@ class _UpiSettleSheetState extends State<UpiSettleSheet> {
         ),
         const SizedBox(height: Spacing.base),
 
-        // ── Open UPI button ──────────────────────────────────────────────
+        // ── Open UPI button (dummy) ───────────────────────────────────────
         SizedBox(
           height: 48,
-          child: ElevatedButton(
-            onPressed: _openUpi,
-            child: Text(
-              'Open ${_selectedApp.label} →',
+          child: ElevatedButton.icon(
+            onPressed: _saving ? null : _openUpi,
+            icon: Text(_selectedApp.emoji,
+                style: const TextStyle(fontSize: 16)),
+            label: Text('Pay via ${_selectedApp.label}'),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: AppColors.forest,
+              foregroundColor: Colors.white,
             ),
           ),
         ),
         const SizedBox(height: Spacing.sm),
-        Text(
-          'Pre-filled with ${CurrencyFormatter.format(widget.debt.amount)} '
-          'and UPI ID. Return here to confirm.',
-          style: AppTextStyles.caption(),
-          textAlign: TextAlign.center,
-        ),
-        const SizedBox(height: Spacing.base),
 
-        // ── Mark settled manually ────────────────────────────────────────
-        DestructiveButton(
-          label: 'Mark as settled',
-          onConfirm: _markSettled,
+        // ── Mark as settled (writes to Firestore) ─────────────────────────
+        SizedBox(
+          height: 44,
+          child: OutlinedButton(
+            onPressed: _saving ? null : _markSettled,
+            style: OutlinedButton.styleFrom(
+              foregroundColor: AppColors.stone,
+              side: const BorderSide(color: AppColors.border, width: 0.5),
+            ),
+            child: _saving
+                ? const SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(
+                        strokeWidth: 2, color: AppColors.stone),
+                  )
+                : const Text('Mark as settled (paid outside app)'),
+          ),
         ),
         const SizedBox(height: Spacing.sm),
         Center(
           child: TextButton(
-            onPressed: () => Navigator.of(context).pop(),
-            child: Text('Cancel',
-                style: AppTextStyles.body(color: AppColors.stone)),
+            onPressed: _saving ? null : () => Navigator.of(context).pop(),
+            child:
+                Text('Cancel', style: AppTextStyles.body(color: AppColors.stone)),
           ),
         ),
         const SizedBox(height: Spacing.sm),
@@ -239,12 +364,15 @@ class _UpiSettleSheetState extends State<UpiSettleSheet> {
             textAlign: TextAlign.center,
           ),
         ),
+        const SizedBox(height: Spacing.sm),
       ],
     );
   }
 }
 
 // ─── Supporting types ─────────────────────────────────────────────────────────
+
+/// Re-exported for backward compat in case anything still references it.
 class UpiDebtInfo {
   final String personName;
   final String upiVpa;
@@ -256,9 +384,33 @@ class UpiDebtInfo {
   });
 }
 
+// ─── UPI app definitions ──────────────────────────────────────────────────────
+
+class DestructiveButton extends StatelessWidget {
+  const DestructiveButton(
+      {super.key, required this.label, required this.onConfirm});
+  final String label;
+  final VoidCallback onConfirm;
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      height: 44,
+      child: OutlinedButton(
+        onPressed: onConfirm,
+        style: OutlinedButton.styleFrom(
+          foregroundColor: AppColors.ember,
+          side: const BorderSide(color: AppColors.ember, width: 0.5),
+        ),
+        child: Text(label),
+      ),
+    );
+  }
+}
+
 enum _UpiApp {
-  gpay(emoji: 'G', label: 'Google Pay', scheme: 'gpay'),
-  phonepe(emoji: '📱', label: 'PhonePe', scheme: 'phonepe'),
+  gpay(emoji: '🟢', label: 'Google Pay', scheme: 'gpay'),
+  phonepe(emoji: '💜', label: 'PhonePe', scheme: 'phonepe'),
   paytm(emoji: '💙', label: 'Paytm', scheme: 'paytmmp');
 
   const _UpiApp(

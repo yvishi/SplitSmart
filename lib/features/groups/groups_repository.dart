@@ -28,16 +28,12 @@ class GroupsRepository {
       updatedAt: now,
     );
 
-    final batch = _db.batch();
-    // Write the group with all members
-    batch.set(docRef, group.toMap());
-    // Update groupIds for every member atomically
-    for (final uid in allMembers) {
-      batch.update(_db.collection('users').doc(uid), {
-        'groupIds': FieldValue.arrayUnion([docRef.id]),
-      });
-    }
-    await batch.commit();
+    // Write the group document — memberUids already stores all members.
+    // We do NOT write groupIds back to each user doc because security rules
+    // only allow a user to write their own document, so cross-user batch
+    // writes would reject the entire batch. streamUserGroups queries groups
+    // by memberUids instead, so groupIds is not needed.
+    await docRef.set(group.toMap());
 
     return group;
   }
@@ -67,41 +63,30 @@ class GroupsRepository {
 
   /// Add a member to a group.
   static Future<void> addMember(String groupId, String targetUid) async {
-    final batch = _db.batch();
-
-    // 1. Add uid to group's memberUids
-    batch.update(_groups.doc(groupId), {
+    await _groups.doc(groupId).update({
       'memberUids': FieldValue.arrayUnion([targetUid]),
       'updatedAt': FieldValue.serverTimestamp(),
     });
-
-    // 2. Add groupId to user's denormalized groupIds
-    batch.update(_db.collection('users').doc(targetUid), {
-      'groupIds': FieldValue.arrayUnion([groupId])
-    });
-
-    await batch.commit();
   }
 
   /// Remove a member from a group.
   static Future<void> removeMember(String groupId, String targetUid) async {
-    final batch = _db.batch();
-
-    batch.update(_groups.doc(groupId), {
+    await _groups.doc(groupId).update({
       'memberUids': FieldValue.arrayRemove([targetUid]),
       'updatedAt': FieldValue.serverTimestamp(),
     });
-
-    batch.update(_db.collection('users').doc(targetUid), {
-      'groupIds': FieldValue.arrayRemove([groupId])
-    });
-
-    await batch.commit();
   }
 
   /// Update group details.
   static Future<void> updateGroup(String groupId, Map<String, dynamic> updates) async {
     updates['updatedAt'] = FieldValue.serverTimestamp();
     await _groups.doc(groupId).update(updates);
+  }
+
+  /// Stream a single group by ID in real-time.
+  static Stream<Group?> streamGroup(String groupId) {
+    return _groups.doc(groupId).snapshots().map(
+          (snap) => snap.exists ? Group.fromDoc(snap) : null,
+        );
   }
 }

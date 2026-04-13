@@ -6,6 +6,7 @@ import '../../core/theme/app_colors.dart';
 import '../../core/theme/app_text_styles.dart';
 import '../../core/theme/spacing.dart';
 import '../../core/utils/haptics.dart';
+import '../contacts/contacts_repository.dart';
 import 'auth_notifier.dart';
 import 'user_repository.dart';
 
@@ -71,7 +72,7 @@ class _CompleteProfileScreenState
       String phone;
       if (_isGoogleUser) {
         final raw = _phoneCtrl.text.trim();
-        phone = raw.startsWith('+') ? raw : '+91$raw';
+        phone = ContactsRepository.normalizePhone(raw);
       } else {
         phone = user.phoneNumber!;
       }
