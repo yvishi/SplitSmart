@@ -2,6 +2,7 @@ import 'dart:io';
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
+import 'package:image_picker/image_picker.dart';
 import '../../core/theme/app_colors.dart';
 import '../../core/theme/app_text_styles.dart';
 import '../../core/theme/spacing.dart';
@@ -10,17 +11,17 @@ import '../../core/utils/haptics.dart';
 import '../../shared/widgets/skeleton_loader.dart';
 import 'ocr_pipeline.dart';
 
-/// The scanner brand moment — 3–4 seconds users spend watching SplitSmart work.
+/// Bill scanner screen.
 ///
 /// State machine:
-///   idle → shutter (haptic) → capturing → processing (shimmer) → done
+///   idle → shutter/pick → capturing → processing (shimmer) → done
 ///
-/// Key design details:
-///  • Full-screen camera preview, no other chrome
-///  • Forest green corner brackets (custom painter)
-///  • Pulsing green dot during processing
-///  • Sequenced status text: "Reading receipt…" → "Identifying items…" → "Almost done…"
-///  • ML Kit badge bottom-left, shimmer receipt skeleton bottom-center
+/// Design:
+///  • Full-screen camera preview, dark vignette, forest corner brackets
+///  • Gallery icon (top-right) for picking an existing photo
+///  • Torch toggle (top-left) with on/off state indicator
+///  • Pulsing dot + sequenced status text + receipt skeleton during processing
+///  • Source badge ("Gemini Vision" / "ML Kit") shown after result
 class ScannerScreen extends StatefulWidget {
   const ScannerScreen({super.key});
 
@@ -32,10 +33,10 @@ class _ScannerScreenState extends State<ScannerScreen>
     with SingleTickerProviderStateMixin {
   CameraController? _camera;
   _ScannerState _state = _ScannerState.idle;
-  String _statusText = 'Point at a receipt';
+  String _statusText = 'Point camera at a receipt';
   int _statusStep = 0;
+  bool _torchOn = false;
 
-  // Processing status messages — sequenced every 900ms
   static const _processingSteps = [
     'Reading receipt…',
     'Identifying items…',
@@ -44,6 +45,8 @@ class _ScannerScreenState extends State<ScannerScreen>
 
   late final AnimationController _pulseController;
   late final Animation<double> _pulse;
+
+  final _picker = ImagePicker();
 
   @override
   void initState() {
@@ -60,15 +63,21 @@ class _ScannerScreenState extends State<ScannerScreen>
 
   Future<void> _initCamera() async {
     final cameras = await availableCameras();
-    if (cameras.isEmpty) return;
+    if (cameras.isEmpty || !mounted) return;
 
     _camera = CameraController(
       cameras.first,
       ResolutionPreset.high,
       enableAudio: false,
     );
-    await _camera!.initialize();
-    if (mounted) setState(() {});
+    try {
+      await _camera!.initialize();
+      if (mounted) setState(() {});
+    } catch (e) {
+      if (mounted) {
+        setState(() => _statusText = 'Camera unavailable — use gallery ↗');
+      }
+    }
   }
 
   @override
@@ -79,23 +88,53 @@ class _ScannerScreenState extends State<ScannerScreen>
     super.dispose();
   }
 
+  // ── Torch toggle ──────────────────────────────────────────────────────────
+
+  Future<void> _toggleTorch() async {
+    if (_camera == null) return;
+    await Haptics.lightTap();
+    final next = _torchOn ? FlashMode.off : FlashMode.torch;
+    await _camera!.setFlashMode(next);
+    setState(() => _torchOn = !_torchOn);
+  }
+
+  // ── Camera shutter ────────────────────────────────────────────────────────
+
   Future<void> _capture() async {
     if (_camera == null || _state != _ScannerState.idle) return;
-
-    // Shutter haptic — the tactile confirmation
     await Haptics.shutter();
     setState(() => _state = _ScannerState.capturing);
 
     try {
-      final file = await _camera!.takePicture();
-      _startProcessing(File(file.path));
+      final xFile = await _camera!.takePicture();
+      // Turn off torch after capture so battery isn't wasted
+      if (_torchOn) {
+        await _camera!.setFlashMode(FlashMode.off);
+        setState(() => _torchOn = false);
+      }
+      _startProcessing(File(xFile.path));
     } catch (e) {
       setState(() {
         _state = _ScannerState.idle;
-        _statusText = 'Couldn\'t capture. Try again.';
+        _statusText = "Couldn't capture. Try again.";
       });
     }
   }
+
+  // ── Gallery pick ──────────────────────────────────────────────────────────
+
+  Future<void> _pickFromGallery() async {
+    if (_state != _ScannerState.idle) return;
+    final xFile = await _picker.pickImage(
+      source: ImageSource.gallery,
+      imageQuality: 90, // light pre-compress; OcrPipeline compresses further
+    );
+    if (xFile == null || !mounted) return;
+    await Haptics.lightTap();
+    _startProcessing(File(xFile.path));
+  }
+
+  // ── Processing ────────────────────────────────────────────────────────────
 
   void _startProcessing(File image) {
     setState(() {
@@ -104,7 +143,7 @@ class _ScannerScreenState extends State<ScannerScreen>
       _statusStep = 0;
     });
 
-    // Sequence status text every 900ms
+    // Cycle status text every 900ms during processing
     for (int i = 1; i < _processingSteps.length; i++) {
       Future.delayed(Duration(milliseconds: 900 * i), () {
         if (mounted && _state == _ScannerState.processing) {
@@ -116,19 +155,25 @@ class _ScannerScreenState extends State<ScannerScreen>
       });
     }
 
-    // Run OCR pipeline
     OcrPipeline.process(image).then((result) {
       if (!mounted) return;
       setState(() => _state = _ScannerState.done);
-      context.go(AppRoutes.itemReview, extra: result);
+      // Pass both the OcrResult and the source File so ItemReviewScreen
+      // can upload the receipt image after the user confirms items.
+      context.go(AppRoutes.itemReview, extra: {
+        'result': result,
+        'imageFile': image,
+      });
     }).catchError((_) {
       if (!mounted) return;
       setState(() {
         _state = _ScannerState.idle;
-        _statusText = 'Couldn\'t read receipt. Try again.';
+        _statusText = "Couldn't read receipt. Try retaking.";
       });
     });
   }
+
+  // ── Build ────────────────────────────────────────────────────────────────
 
   @override
   Widget build(BuildContext context) {
@@ -137,7 +182,7 @@ class _ScannerScreenState extends State<ScannerScreen>
       body: Stack(
         fit: StackFit.expand,
         children: [
-          // ── Camera preview ───────────────────────────────────────────────
+          // ── Camera preview ──────────────────────────────────────────────
           if (_camera != null && _camera!.value.isInitialized)
             SizedBox.expand(
               child: FittedBox(
@@ -152,7 +197,7 @@ class _ScannerScreenState extends State<ScannerScreen>
           else
             const ColoredBox(color: Colors.black),
 
-          // Dark vignette overlay
+          // Dark radial vignette
           Container(
             decoration: const BoxDecoration(
               gradient: RadialGradient(
@@ -163,7 +208,7 @@ class _ScannerScreenState extends State<ScannerScreen>
             ),
           ),
 
-          // ── Forest corner brackets ───────────────────────────────────────
+          // ── Forest corner brackets ──────────────────────────────────────
           Positioned.fill(
             child: Padding(
               padding: const EdgeInsets.symmetric(
@@ -178,90 +223,77 @@ class _ScannerScreenState extends State<ScannerScreen>
             ),
           ),
 
-          // ── Top bar ──────────────────────────────────────────────────────
+          // ── Top bar ────────────────────────────────────────────────────
           Positioned(
-            top: 0,
-            left: 0,
-            right: 0,
+            top: 0, left: 0, right: 0,
             child: SafeArea(
               child: Padding(
                 padding: const EdgeInsets.symmetric(
-                    horizontal: Spacing.base, vertical: Spacing.sm),
+                    horizontal: Spacing.sm, vertical: Spacing.xs),
                 child: Row(
                   children: [
+                    // Close
                     IconButton(
                       icon: const Icon(Icons.close, color: Colors.white),
+                      tooltip: 'Close',
                       onPressed: () => context.pop(),
                     ),
                     const Spacer(),
-                    // Torch toggle
+                    // Torch toggle with on/off indicator
                     if (_camera != null)
-                      IconButton(
-                        icon: const Icon(
-                            Icons.flash_auto_outlined,
-                            color: Colors.white),
-                        onPressed: () =>
-                            _camera!.setFlashMode(FlashMode.torch),
+                      _TorchButton(
+                        isOn: _torchOn,
+                        onTap: _toggleTorch,
                       ),
+                    const SizedBox(width: Spacing.xs),
+                    // Gallery pick
+                    _GalleryButton(onTap: _pickFromGallery),
                   ],
                 ),
               ),
             ),
           ),
 
-          // ── Processing overlay ───────────────────────────────────────────
+          // ── Processing overlay ──────────────────────────────────────────
           if (_state == _ScannerState.processing) ...[
-            // Blurred black overlay
             Container(color: const Color(0xCC000000)),
-
-            // Shimmer skeleton receipt
             Center(
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  // Pulsing green dot
                   AnimatedBuilder(
                     animation: _pulse,
                     builder: (_, __) => Container(
-                      width: 10,
-                      height: 10,
+                      width: 10, height: 10,
                       decoration: BoxDecoration(
                         shape: BoxShape.circle,
-                        color: AppColors.forest
-                            .withOpacity(_pulse.value),
+                        color: AppColors.forest.withOpacity(_pulse.value),
                       ),
                     ),
                   ),
                   const SizedBox(height: Spacing.md),
-
-                  // Status text
                   AnimatedSwitcher(
                     duration: const Duration(milliseconds: 300),
                     child: Text(
                       _statusText,
                       key: ValueKey(_statusStep),
                       style: AppTextStyles.bodyMedium(color: Colors.white),
+                      textAlign: TextAlign.center,
                     ),
                   ),
                   const SizedBox(height: Spacing.xl),
-
-                  // Shimmer receipt skeleton
                   const ReceiptSkeleton(),
                   const SizedBox(height: Spacing.lg),
-
-                  // ML Kit + Gemini AI badge
                   Container(
                     padding: const EdgeInsets.symmetric(
                         horizontal: Spacing.md, vertical: Spacing.xs),
                     decoration: BoxDecoration(
                       color: const Color(0x33FFFFFF),
-                      borderRadius:
-                          BorderRadius.circular(AppRadius.full),
+                      borderRadius: BorderRadius.circular(AppRadius.full),
                     ),
                     child: Text(
-                      '✦ ML Kit · Gemini AI',
-                      style: AppTextStyles.caption(
-                              color: Colors.white70)
+                      '✦ Gemini Vision · ML Kit',
+                      style: AppTextStyles.caption(color: Colors.white70)
                           .copyWith(fontWeight: FontWeight.w500),
                     ),
                   ),
@@ -270,18 +302,15 @@ class _ScannerScreenState extends State<ScannerScreen>
             ),
           ],
 
-          // ── Bottom controls ──────────────────────────────────────────────
+          // ── Bottom controls ─────────────────────────────────────────────
           if (_state != _ScannerState.processing)
             Positioned(
-              bottom: 0,
-              left: 0,
-              right: 0,
+              bottom: 0, left: 0, right: 0,
               child: SafeArea(
                 child: Padding(
                   padding: const EdgeInsets.only(bottom: Spacing.xl),
                   child: Column(
                     children: [
-                      // Status hint
                       Text(
                         _state == _ScannerState.idle
                             ? _statusText
@@ -296,23 +325,19 @@ class _ScannerScreenState extends State<ScannerScreen>
                         onTap: _capture,
                         child: AnimatedContainer(
                           duration: const Duration(milliseconds: 150),
-                          width: 72,
-                          height: 72,
+                          width: 72, height: 72,
                           decoration: BoxDecoration(
                             shape: BoxShape.circle,
                             color: _state == _ScannerState.capturing
                                 ? AppColors.forest
                                 : Colors.white,
                             border: Border.all(
-                              color: AppColors.forest,
-                              width: 3,
-                            ),
+                                color: AppColors.forest, width: 3),
                           ),
                           child: _state == _ScannerState.capturing
                               ? const Center(
                                   child: SizedBox(
-                                    width: 24,
-                                    height: 24,
+                                    width: 24, height: 24,
                                     child: CircularProgressIndicator(
                                       strokeWidth: 2.5,
                                       color: Colors.white,
@@ -324,14 +349,11 @@ class _ScannerScreenState extends State<ScannerScreen>
                       ),
                       const SizedBox(height: Spacing.base),
 
-                      // Manual entry fallback
                       TextButton(
-                        onPressed: () =>
-                            context.go(AppRoutes.addExpense),
+                        onPressed: () => context.go(AppRoutes.addExpense),
                         child: Text(
                           'Enter manually instead',
-                          style: AppTextStyles.caption(
-                              color: Colors.white60),
+                          style: AppTextStyles.caption(color: Colors.white60),
                         ),
                       ),
                     ],
@@ -345,17 +367,67 @@ class _ScannerScreenState extends State<ScannerScreen>
   }
 }
 
-// ─── Scanner state ────────────────────────────────────────────────────────────
+// ─── State ───────────────────────────────────────────────────────────────────
 enum _ScannerState { idle, capturing, processing, done }
 
-// ─── Forest corner brackets painter ──────────────────────────────────────────
+// ─── Torch button ────────────────────────────────────────────────────────────
+class _TorchButton extends StatelessWidget {
+  const _TorchButton({required this.isOn, required this.onTap});
+  final bool isOn;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 200),
+        padding: const EdgeInsets.all(8),
+        decoration: BoxDecoration(
+          color: isOn
+              ? Colors.amber.withOpacity(0.3)
+              : Colors.white.withOpacity(0.15),
+          shape: BoxShape.circle,
+        ),
+        child: Icon(
+          isOn ? Icons.flash_on : Icons.flash_off,
+          color: isOn ? Colors.amber : Colors.white,
+          size: 22,
+        ),
+      ),
+    );
+  }
+}
+
+// ─── Gallery button ──────────────────────────────────────────────────────────
+class _GalleryButton extends StatelessWidget {
+  const _GalleryButton({required this.onTap});
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.all(8),
+        decoration: BoxDecoration(
+          color: Colors.white.withOpacity(0.15),
+          shape: BoxShape.circle,
+        ),
+        child: const Icon(Icons.photo_library_outlined,
+            color: Colors.white, size: 22),
+      ),
+    );
+  }
+}
+
+// ─── Corner bracket painter ──────────────────────────────────────────────────
 class _BracketPainter extends CustomPainter {
   const _BracketPainter({
     required this.color,
     required this.strokeWidth,
     required this.cornerLength,
   });
-
   final Color color;
   final double strokeWidth;
   final double cornerLength;
@@ -372,19 +444,12 @@ class _BracketPainter extends CustomPainter {
     final w = size.width;
     final h = size.height;
 
-    // Top-left
-    canvas.drawLine(Offset(0, cl), Offset(0, 0), paint);
-    canvas.drawLine(Offset(0, 0), Offset(cl, 0), paint);
-
-    // Top-right
+    canvas.drawLine(Offset(0, cl), const Offset(0, 0), paint);
+    canvas.drawLine(const Offset(0, 0), Offset(cl, 0), paint);
     canvas.drawLine(Offset(w - cl, 0), Offset(w, 0), paint);
     canvas.drawLine(Offset(w, 0), Offset(w, cl), paint);
-
-    // Bottom-left
     canvas.drawLine(Offset(0, h - cl), Offset(0, h), paint);
     canvas.drawLine(Offset(0, h), Offset(cl, h), paint);
-
-    // Bottom-right
     canvas.drawLine(Offset(w - cl, h), Offset(w, h), paint);
     canvas.drawLine(Offset(w, h), Offset(w, h - cl), paint);
   }

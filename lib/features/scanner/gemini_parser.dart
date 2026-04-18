@@ -1,108 +1,175 @@
-/// SplitSmart — Gemini Flash LLM receipt parser.
+/// SplitSmart — Gemini Vision receipt parser.
 ///
-/// Used as a fallback when ML Kit regex extraction fails or confidence < 0.7.
-/// Single API call with a tight prompt — returns structured JSON items + prices.
+/// Primary path: sends the raw image bytes (JPEG) directly to Gemini 2.0 Flash
+/// as a multimodal [DataPart].  Gemini sees the full spatial layout — column
+/// alignment, qty × price, GST lines — and returns structured JSON.
 ///
-/// Call flow:
-///   ML Kit extracts raw text → GeminiParser.parse(rawText) → List<ParsedItem>
-///   On failure → returns empty list so we gracefully degrade to manual entry.
+/// Fallback (text-only): [parse] accepts raw OCR text for offline/ML Kit mode.
+///
+/// Confidence model:
+///   Vision path  → 0.90 (Gemini saw the image directly)
+///   Text path    → 0.80 (Gemini is reasoning from OCR text)
+///   Regex path   → 0.90 (tight pattern) / 0.55 (loose match)
 
 import 'dart:convert';
-import 'package:http/http.dart' as http;
+import 'dart:typed_data';
+import 'package:google_generative_ai/google_generative_ai.dart';
 
-class GeminiParser {
-  // Define in launch via --dart-define=GEMINI_API_KEY=your_key
-  static const _apiKey = String.fromEnvironment('GEMINI_API_KEY', defaultValue: '');
-  static const _model = 'gemini-1.5-flash-latest';
-  static const _endpoint =
-      'https://generativelanguage.googleapis.com/v1beta/models/$_model:generateContent';
+// ─── Shared prompt rules ──────────────────────────────────────────────────────
+const _kRules = '''
+You are an expert Indian receipt parser.
 
-  /// Parse raw OCR text into structured items.
-  /// Returns empty list on any failure — caller must handle gracefully.
-  static Future<List<ParsedItem>> parse(String rawOcrText) async {
-    if (rawOcrText.trim().isEmpty) return [];
-
-    final prompt = '''
-You are a receipt parser. Extract line items and prices from this raw receipt text.
-
-Rules:
-- Return ONLY valid JSON, no markdown, no explanation.
-- Format: {"items": [{"name": "Item Name", "price": 99.00}, ...]}
-- Prices must be numbers (no currency symbols).
-- Ignore totals, taxes, subtotals, discounts — only line items.
-- If you cannot parse, return {"items": []}
-
-Receipt text:
-$rawOcrText
+Rules — follow exactly:
+1. Return ONLY valid JSON with this schema:
+   {"items": [{"name": "...", "price": 99.50, "qty": 1}, ...]}
+2. Prices must be bare numbers in INR (strip ₹ / Rs symbols, no currency prefix).
+3. "qty" defaults to 1 if not printed. If qty × unit_price appears, store the LINE TOTAL in "price".
+4. IGNORE completely: GST, CGST, SGST, taxes, service charge, packaging,
+   subtotal, grand total, totals, discounts, coupons, loyalty points,
+   "Amount Payable", "Balance Due", restaurant name, table number, date/time.
+5. Only include individual purchased LINE ITEMS (food, drinks, services sold).
+6. If you cannot find any items, return {"items": []}.
+7. No markdown, no explanation — pure JSON only.
 ''';
 
+class GeminiParser {
+  // Injected at build time: flutter run --dart-define=GEMINI_API_KEY=your_key
+  static const _apiKey =
+      String.fromEnvironment('GEMINI_API_KEY', defaultValue: '');
+
+  // gemini-2.0-flash: same cost tier as 1.5-flash, better table parsing
+  static const _modelName = 'gemini-2.0-flash';
+
+  // ── Vision path (primary) ──────────────────────────────────────────────────
+
+  /// Parse a receipt image [bytes] (JPEG/PNG) directly via Gemini Vision.
+  ///
+  /// Returns an empty list on any failure — callers must handle gracefully.
+  static Future<List<ParsedItem>> parseImage(Uint8List bytes) async {
+    if (_apiKey.isEmpty) return [];
     try {
-      final response = await http
-          .post(
-            Uri.parse('$_endpoint?key=$_apiKey'),
-            headers: {'Content-Type': 'application/json'},
-            body: jsonEncode({
-              'contents': [
-                {
-                  'parts': [
-                    {'text': prompt}
-                  ]
-                }
-              ],
-              'generationConfig': {
-                'temperature': 0.1,       // low — we want facts, not creativity
-                'maxOutputTokens': 1024,
-                'responseMimeType': 'application/json',
-              },
-            }),
-          )
-          .timeout(const Duration(seconds: 12));
+      final model = GenerativeModel(
+        model: _modelName,
+        apiKey: _apiKey,
+        generationConfig: GenerationConfig(
+          temperature: 0.1,    // extract facts, not creativity
+          maxOutputTokens: 1024,
+          responseMimeType: 'application/json',
+        ),
+      );
 
-      if (response.statusCode != 200) return [];
+      final imagePart = DataPart('image/jpeg', bytes);
+      final promptPart = TextPart(
+        '$_kRules\n\nAnalyze the receipt image above and extract all line items.',
+      );
 
-      final json = jsonDecode(response.body) as Map<String, dynamic>;
-      final text =
-          json['candidates']?[0]?['content']?['parts']?[0]?['text'] as String?;
-      if (text == null) return [];
+      final response = await model
+          .generateContent([Content.multi([promptPart, imagePart])])
+          .timeout(const Duration(seconds: 20));
 
-      final parsed = jsonDecode(text) as Map<String, dynamic>;
+      return _parseJson(response.text, confidence: 0.90);
+    } catch (_) {
+      return [];
+    }
+  }
+
+  // ── Text-only path (offline / ML Kit fallback) ────────────────────────────
+
+  /// Parse raw OCR text extracted by ML Kit.
+  ///
+  /// Less accurate than [parseImage] because spatial layout is lost, but still
+  /// far better than regex alone for messy/non-standard receipts.
+  static Future<List<ParsedItem>> parse(String rawOcrText) async {
+    if (rawOcrText.trim().isEmpty || _apiKey.isEmpty) return [];
+    try {
+      final model = GenerativeModel(
+        model: _modelName,
+        apiKey: _apiKey,
+        generationConfig: GenerationConfig(
+          temperature: 0.1,
+          maxOutputTokens: 1024,
+          responseMimeType: 'application/json',
+        ),
+      );
+
+      final response = await model.generateContent([
+        Content.text('$_kRules\n\nReceipt text:\n$rawOcrText'),
+      ]).timeout(const Duration(seconds: 15));
+
+      return _parseJson(response.text, confidence: 0.80);
+    } catch (_) {
+      return [];
+    }
+  }
+
+  // ── JSON → ParsedItem[] ───────────────────────────────────────────────────
+
+  static List<ParsedItem> _parseJson(String? text, {required double confidence}) {
+    if (text == null || text.trim().isEmpty) return [];
+    try {
+      // Gemini occasionally wraps JSON in markdown code fences — strip them.
+      final cleaned = text
+          .replaceAll(RegExp(r'^```json\s*', multiLine: true), '')
+          .replaceAll(RegExp(r'^```\s*', multiLine: true), '')
+          .trim();
+
+      final parsed = jsonDecode(cleaned) as Map<String, dynamic>;
       final rawItems = parsed['items'] as List<dynamic>? ?? [];
 
-      return rawItems.map((item) {
+      return rawItems.where((item) {
+        final price = (item['price'] as num?)?.toDouble() ?? 0.0;
+        final name = (item['name'] as String?)?.trim() ?? '';
+        return price > 0 && name.isNotEmpty;
+      }).map((item) {
         return ParsedItem(
-          name: item['name'] as String? ?? 'Unknown Item',
-          price: (item['price'] as num?)?.toDouble() ?? 0.0,
-          confidence: 0.85, // LLM-parsed items get a fixed confidence of 0.85
+          name: (item['name'] as String).trim(),
+          price: (item['price'] as num).toDouble(),
+          qty: (item['qty'] as num?)?.toInt() ?? 1,
+          confidence: confidence,
         );
       }).toList();
     } catch (_) {
-      // Network error, timeout, parse failure — always degrade gracefully
       return [];
     }
   }
 }
 
-/// A single parsed receipt item returned by [GeminiParser] or ML Kit regex.
+// ─── ParsedItem ────────────────────────────────────────────────────────────────
+
+/// A single receipt line item parsed by [GeminiParser] or ML Kit regex.
 class ParsedItem {
   final String name;
+
+  /// Line total in INR (= qty × unit price if qty > 1).
   final double price;
 
-  /// 0.0–1.0. ML Kit regex: variable. Gemini: 0.85. Manual: 1.0.
-  /// Values < 0.7 get amber highlight in the item list.
+  /// Number of units. Defaults to 1.
+  final int qty;
+
+  /// 0.0–1.0 confidence score.
+  /// Vision path: 0.90. Text path: 0.80. Regex tight: 0.90. Regex loose: 0.55.
+  /// Values < 0.7 are highlighted amber in the review screen.
   final double confidence;
 
   const ParsedItem({
     required this.name,
     required this.price,
+    this.qty = 1,
     required this.confidence,
   });
 
   bool get isLowConfidence => confidence < 0.7;
 
-  ParsedItem copyWith({String? name, double? price, double? confidence}) {
+  ParsedItem copyWith({
+    String? name,
+    double? price,
+    int? qty,
+    double? confidence,
+  }) {
     return ParsedItem(
       name: name ?? this.name,
       price: price ?? this.price,
+      qty: qty ?? this.qty,
       confidence: confidence ?? this.confidence,
     );
   }

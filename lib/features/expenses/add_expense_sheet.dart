@@ -2,6 +2,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 import 'package:uuid/uuid.dart';
 import '../../core/theme/app_colors.dart';
 import '../../core/theme/app_text_styles.dart';
@@ -16,9 +17,15 @@ import '../groups/expenses_repository.dart';
 import '../home/home_providers.dart';
 
 /// Add Expense bottom sheet — supports all 4 split types.
+/// When [scannerData] is provided (from the bill scanner), the title
+/// and amount fields are pre-filled from the scanned receipt.
 class AddExpenseSheet extends ConsumerStatefulWidget {
-  const AddExpenseSheet({super.key, this.groupId});
+  const AddExpenseSheet({super.key, this.groupId, this.scannerData});
   final String? groupId;
+
+  /// Pre-fill data from the bill scanner.
+  /// Keys: 'items', 'total', 'taxFraction', 'tipFraction', 'receiptImageUrl'
+  final Map<String, dynamic>? scannerData;
 
   static Future<void> show(BuildContext context, {String? groupId}) {
     return AppBottomSheet.show(
@@ -36,6 +43,7 @@ class _AddExpenseSheetState extends ConsumerState<AddExpenseSheet> {
   final _amountCtrl = TextEditingController();
   SplitType _splitType = SplitType.equal;
   ExpenseCategory _category = ExpenseCategory.food;
+  String? _receiptImageUrl;
 
   // Use String ID for dropdown — avoids Group object != issue after stream rebuild
   String? _selectedGroupId;
@@ -44,6 +52,30 @@ class _AddExpenseSheetState extends ConsumerState<AddExpenseSheet> {
   bool _initialized = false;
   /// uid → display name cache (loaded from Firestore)
   final Map<String, String> _memberNames = {};
+
+  @override
+  void initState() {
+    super.initState();
+    // Pre-fill from scanner if available
+    final sd = widget.scannerData;
+    if (sd != null) {
+      final items = sd['items'] as List? ?? [];
+      if (items.isNotEmpty) {
+        // Build a smart title: first item name, or generic label
+        final firstName = (items.first['name'] as String?) ?? '';
+        _titleCtrl.text = items.length == 1
+            ? firstName
+            : '$firstName + ${items.length - 1} more';
+      } else {
+        _titleCtrl.text = 'Scanned Receipt';
+      }
+      final total = (sd['total'] as num?)?.toDouble() ?? 0.0;
+      if (total > 0) {
+        _amountCtrl.text = total.toStringAsFixed(2);
+      }
+      _receiptImageUrl = sd['receiptImageUrl'] as String?;
+    }
+  }
 
   @override
   void dispose() {
@@ -338,12 +370,16 @@ class _AddExpenseSheetState extends ConsumerState<AddExpenseSheet> {
     final amount = double.tryParse(_amountCtrl.text) ?? 0.0;
     if (amount <= 0 || _selectedGroupId == null) return;
 
-    // Payer (current user) is always a participant, plus whoever was selected
     final auth = ref.read(authStateProvider);
     final currentUid = auth is AuthAuthenticated ? auth.profile.uid : null;
     if (currentUid == null) return;
 
     final participants = {currentUid, ..._selectedMembers}.toList();
+
+    // Pull tax/tip fractions from scanner data if available
+    final sd = widget.scannerData;
+    final taxFraction = (sd?['taxFraction'] as num?)?.toDouble() ?? 0.0;
+    final tipFraction = (sd?['tipFraction'] as num?)?.toDouble() ?? 0.0;
 
     final expense = Expense(
       id: const Uuid().v4(),
@@ -354,9 +390,12 @@ class _AddExpenseSheetState extends ConsumerState<AddExpenseSheet> {
       splitType: _splitType,
       paidByUid: currentUid,
       participantUids: participants,
+      taxFraction: taxFraction,
+      tipFraction: tipFraction,
       createdAt: DateTime.now(),
       updatedAt: DateTime.now(),
       createdByUid: currentUid,
+      receiptImagePath: _receiptImageUrl,
     );
 
     await ExpensesRepository.createExpense(
@@ -364,7 +403,14 @@ class _AddExpenseSheetState extends ConsumerState<AddExpenseSheet> {
       expense: expense,
     );
 
-    if (mounted) Navigator.of(context).pop();
+    if (!mounted) return;
+    // When opened as a full-screen route (from scanner), go home.
+    // When shown as a bottom sheet (from elsewhere), pop.
+    if (Navigator.of(context).canPop()) {
+      Navigator.of(context).pop();
+    } else if (context.mounted) {
+      context.go('/home');
+    }
   }
 }
 
